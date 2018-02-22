@@ -9,8 +9,11 @@ from scipy.io import loadmat
 """EXITATION SIGNALS"""
 
 
-def exponential_sweep(T, fs, tfade=0.05):
+def exponential_sweep(T, fs, tfade=0.05, f_start=None, f_end=None):
+
     """Generate exponential sweep.
+
+    Sweep constructed in time domain as described by `Farina`_ plus windowing.
 
     Parameters
     ----------
@@ -26,17 +29,25 @@ def exponential_sweep(T, fs, tfade=0.05):
     ndarray, floats, shape (round(T*fs),)
         An exponential sweep
 
+    .. _Farina:
+       A. Farina, “Simultaneous measurement of impulse response and distortion
+       with a swept-sine techniqueMinnaar, Pauli,” in Proc. AES 108th conv,
+       Paris, France, 2000, pp. 1–15.
+
     """
-    N = int(np.round(T * fs))
+    ntaps = int(np.round(T * fs))
 
     # start and stop frequencies
-    f_start = fs / N
-    f_end = fs / 2
+    if f_start is None:
+        f_start = fs / ntaps
+    if f_end is None:
+        f_end = fs / 2
+
     w_start = 2 * np.pi * f_start
     w_end = 2 * np.pi * f_end
 
     # constuct sweep
-    t = np.linspace(0, T, N)
+    t = np.linspace(0, T, ntaps)
     sweep = np.sin(w_start * T / np.log(w_end / w_start) *
                    (np.exp(t / T * np.log(w_end / w_start)) - 1))
     sweep = sweep * 0.95  # some buffer in amplitude
@@ -48,6 +59,43 @@ def exponential_sweep(T, fs, tfade=0.05):
     sweep[-n_fade:] = sweep[-n_fade:] * fading_window[-n_fade:]
 
     return sweep
+
+
+def exponential_sweep_harmonic_delay(T, fs, N, f_start=None, f_end=None):
+    """Delay of harmonic impulse response.
+
+    From `Farina`_.
+
+    Parameters
+    ----------
+    T : float
+        Iength of impulse response.
+    N : int
+        Order of harmonic.
+    f_start, f_end : float or None, optional
+        Start and stop frequencies of exponential sweep.
+
+    Returns
+    -------
+    TYPE
+        Description
+
+    .. _Farina:
+       A. Farina, “Simultaneous measurement of impulse response and distortion
+       with a swept-sine techniqueMinnaar, Pauli,” in Proc. AES 108th conv,
+       Paris, France, 2000, pp. 1–15.
+    """
+    ntaps = int(np.round(T * fs))
+
+    if f_start is None:
+        f_start = fs / ntaps
+    if f_end is None:
+        f_end = fs / 2
+
+    w_start = 2 * np.pi * f_start
+    w_end = 2 * np.pi * f_end
+
+    return T * np.log(N) / np.log(w_end / w_start)
 
 
 def pink_noise(T, fs, tfade=0.1, flim=(5, 20e3)):
@@ -228,7 +276,7 @@ def load_recordings(fname, n_ls=1, n_avg=1):
     fh = data['File_Header']
     n_ch = int(fh.NumberOfChannels)
     fs = int(float(fh.SampleFrequency))  # only int() doesn't work ...
-    n_tap = int(fh.NumberOfSamplesPerChannel) // n_ls // n_avg
+    n_tap = int(int(fh.NumberOfSamplesPerChannel) / n_ls / n_avg)
 
     recs = np.zeros((n_ch, n_ls, n_avg, n_tap))
     for i in range(n_ch):

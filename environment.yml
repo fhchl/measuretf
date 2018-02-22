@@ -1,4 +1,4 @@
-name: sfcf
+name: measuretf
 channels:
   - defaults
   - conda-forge
