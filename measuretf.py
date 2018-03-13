@@ -2,15 +2,15 @@
 
 import numpy as np
 
+from pathlib import Path
 from scipy.signal import hann, butter, lfilter
 from scipy.io import loadmat
 
-
+from tqdm import tqdm
 """EXITATION SIGNALS"""
 
 
 def exponential_sweep(T, fs, tfade=0.05, f_start=None, f_end=None):
-
     """Generate exponential sweep.
 
     Sweep constructed in time domain as described by `Farina`_ plus windowing.
@@ -59,43 +59,6 @@ def exponential_sweep(T, fs, tfade=0.05, f_start=None, f_end=None):
     sweep[-n_fade:] = sweep[-n_fade:] * fading_window[-n_fade:]
 
     return sweep
-
-
-def exponential_sweep_harmonic_delay(T, fs, N, f_start=None, f_end=None):
-    """Delay of harmonic impulse response.
-
-    From `Farina`_.
-
-    Parameters
-    ----------
-    T : float
-        Iength of impulse response.
-    N : int
-        Order of harmonic.
-    f_start, f_end : float or None, optional
-        Start and stop frequencies of exponential sweep.
-
-    Returns
-    -------
-    TYPE
-        Description
-
-    .. _Farina:
-       A. Farina, “Simultaneous measurement of impulse response and distortion
-       with a swept-sine techniqueMinnaar, Pauli,” in Proc. AES 108th conv,
-       Paris, France, 2000, pp. 1–15.
-    """
-    ntaps = int(np.round(T * fs))
-
-    if f_start is None:
-        f_start = fs / ntaps
-    if f_end is None:
-        f_end = fs / 2
-
-    w_start = 2 * np.pi * f_start
-    w_end = 2 * np.pi * f_end
-
-    return T * np.log(N) / np.log(w_end / w_start)
 
 
 def pink_noise(T, fs, tfade=0.1, flim=(5, 20e3)):
@@ -192,10 +155,12 @@ def transfer_function(ref, meas, axis=-1):
         Transfer-function between ref and
         meas.
     """
-    R = np.fft.rfft(ref, axis=axis)   # no need for normalization because
+    assert ref.shape == meas.shape
+    n = ref.shape[axis]
+    R = np.fft.rfft(ref, axis=axis)  # no need for normalization because
     Y = np.fft.rfft(meas, axis=axis)  # of division
     H = Y / (R + np.spacing(1))  # avoid devided-by-zero errors
-    h = frequency2time(H, axis=axis)
+    h = np.fft.irfft(H, axis=axis, n=n)
     return h
 
 
@@ -287,6 +252,189 @@ def load_recordings(fname, n_ls=1, n_avg=1):
     return recs, fs
 
 
+def transfer_functions_from_recordings(fp,
+                                       n_och,
+                                       n_meas,
+                                       H_comp=None,
+                                       fformat='Recording-{}.mat',
+                                       n_avg=1,
+                                       ref_ch=0,
+                                       lowpass_lim=None,
+                                       take_T=None):
+    """Calculate transfer-functions from a set of recordings inside a folder.
+
+    Parameters
+    ----------
+    fp : str or Path
+        Path to folder.
+    n_och : int
+        Number of serially measured channels.
+    n_meas : int
+        Total number of recordings
+    H_comp : None or ndarray, shape (n_ich - 1, nf), optional
+        If present, apply a compensation filter to each single recording.
+    fformat : str, optional
+        Recording file naming. Must include one '{}' to enumerate.
+    n_avg : int, optional
+        Number of averages.
+    ref_ch : int, optional
+        Index of reference channel
+    lowpass_lim : None or Tuple, optional
+        Tuple (fl, fu) that defines transition range of lowpass filter.
+    take_T : float or None, optional
+        If float, only take the take_T first seconds of the impulse responses.
+
+    Returns
+    -------
+    ndarray, shape (n_meas, n_ich - 1, n_och, ntaps // 2 + 1)
+        Transfer-functions. Possibly lowpass filtered
+    """
+    fpath = Path(fp)
+
+    # read meta data from first recording
+    fs, ntaps, n_ich = header_info(fpath / fformat.format(1))
+
+    if take_T is not None:
+        # only take first take_T seconds of impulse responses
+        ntaps = take_T * fs
+    else:
+        ntaps = int(ntaps / n_och / n_avg)
+
+    H = np.zeros((n_meas, n_ich - 1, n_och, ntaps // 2 + 1), dtype=complex)
+
+    for i in tqdm(np.arange(n_meas)):
+        fname = fpath / 'Recording-{}.mat'.format(i + 1)
+
+        temp, fs = load_recordings(fname, n_och, n_avg=n_avg)
+        temp = multi_transfer_function(temp, ref_ch=ref_ch)
+
+        # exclude reference channel
+        temp = temp[1:]
+
+        if take_T is not None:
+            # only take first take_T seconds
+            temp = temp[:, :, :ntaps]
+
+        if lowpass_lim is not None:
+            # filter out HF noise
+            temp = lowpass_by_frequency_domain_window(fs, temp, *lowpass_lim)
+
+        H[i] = np.fft.rfft(temp)
+
+        if H_comp is not None:
+            # apply compensation filter
+            H[i] = H[i] * H_comp[:, None, :]
+
+    return H, fs
+
+
+"""NON_LINEAR"""
+
+
+def exponential_sweep_harmonic_delay(T, fs, N, f_start=None, f_end=None):
+    """Delay of harmonic impulse response.
+
+    From `Farina`_.
+
+    Parameters
+    ----------
+    T : float
+        Iength of impulse response.
+    N : int
+        Order of harmonic. First harmonic is fundamental.
+    f_start, f_end : float or None, optional
+        Start and stop frequencies of exponential sweep.
+
+    Returns
+    -------
+    TYPE
+        Description
+
+    .. _Farina:
+       A. Farina, “Simultaneous measurement of impulse response and distortion
+       with a swept-sine techniqueMinnaar, Pauli,” in Proc. AES 108th conv,
+       Paris, France, 2000, pp. 1–15.
+    """
+    ntaps = int(np.round(T * fs))
+
+    if f_start is None:
+        f_start = fs / ntaps
+    if f_end is None:
+        f_end = fs / 2
+
+    w_start = 2 * np.pi * f_start
+    w_end = 2 * np.pi * f_end
+
+    return T * np.log(N) / np.log(w_end / w_start)
+
+
+def harmonic_spectrum(r, fs, order=10):
+    """Energy of non-linear components of sweept impulse response.
+
+    Parameters
+    ----------
+    r : ndarray
+        Impulse response from sine sweept measurement.
+    fs : int
+        sample rate
+    order : int, optional
+        Number of harmonics.
+
+    Returns
+    -------
+    ndarray, length order
+        The energy of the nth order harmonics in the impules response.
+    """
+    n = r.size
+    orders = np.arange(1, order+2)
+    T = n / fs
+
+    # find max and circshift it to tap 0
+    r = np.roll(r, -np.argmax(np.abs(r)**2))
+
+    # delays of non-linear components
+    dts = exponential_sweep_harmonic_delay(T, fs, orders)
+    dns = np.round((T - dts) * fs).astype(int)
+    dns[0] = n
+
+    e = np.zeros(order)
+
+    # fundamental
+    n_start = int(round((dns[1] + dns[0]) / 2))
+    n_end = int(round((dns[-1] / 2)))
+    e[0] = np.sum(np.abs(r[n_start:])**2)
+    e[0] += np.sum(np.abs(r[:n_end])**2)
+
+    # higher order
+    for i in orders[:-2]:
+        n_start = int(round((dns[i+1] + dns[i]) / 2))
+        n_end = int(round((dns[i] + dns[i-1]) / 2))
+        e[i] = np.sum(np.abs(r[n_start:n_end])**2)
+
+    return e
+
+
+def thd(r, fs, order=10):
+    """Total Harmonic Distortion from swept sine measurement.
+
+    Parameters
+    ----------
+    r : ndarray
+        Impulse response from sine sweept measurement.
+    fs : int
+        sample rate
+    order : int, optional
+        Number of harmonics.
+
+    Returns
+    -------
+    float
+        THD.
+    """
+    e = harmonic_spectrum(r, fs, order=order)
+    return np.sqrt(np.sum(e[1:]) / e[0])
+
+
 """FILTERING"""
 
 
@@ -335,20 +483,20 @@ def lowpass_by_frequency_domain_window(fs, x, fstart, fstop, axis=-1):
     half_window = symmetric_window[window_width:]
 
     # frequency domain
-    X_windowed = time2frequency(x, axis=axis)
+    X_windowed = np.fft.rfft(x, axis=axis)
     X_windowed = np.moveaxis(X_windowed, axis, 0)
     X_windowed[windowed_samples] = (
         X_windowed[windowed_samples].T * half_window.T).T  # broadcasting
     X_windowed[stop:] = 0
     X_windowed = np.moveaxis(X_windowed, 0, axis)
 
-    return frequency2time(X_windowed)
+    return np.fft.irfft(X_windowed)
 
 
 """FFT FUNCS"""
 
 
-def frequency_vector(n, fs):
+def frequency_vector(n, fs, sided='single'):
     """Frequency values of filter with n taps sampled at fs up to Nyquist.
 
     Parameters
@@ -363,16 +511,19 @@ def frequency_vector(n, fs):
     (n // 2 + 1) ndarray
         Frequencies in Hz
 
+    ALTERNATIVELY:
+        np.abs(np.fft.fftfreq(n, 1)[:n // 2 + 1])
     """
-    f = np.arange(n // 2 + 1) / (n // 2)  #
-    if n % 2 == 0:  # last element is Nyquist
-        f *= fs / 2
-    else:  # last element is not Nyquist
-        f *= fs / 2 * (n - 1) / n
+    if sided == 'single':
+        f = np.arange(n // 2 + 1) * fs / n
+    elif sided == 'double':
+        f = np.arange(n) * fs / n
+    else:
+        raise ValueError('Invalid value for sided.')
     return f
 
 
-def time2frequency(x, axis=-1, norm=True):
+def amplitude_spectrum(x, axis=-1, norm=True):
     """Convert time domain signal to single sided amplitude spectrum.
 
     Parameters
@@ -427,7 +578,7 @@ def time2frequency(x, axis=-1, norm=True):
     return X
 
 
-def frequency2time(X, isEvenSampled=True, axis=-1, norm=True):
+def inverse_amplitude_spectrum(X, isEvenSampled=True, axis=-1, norm=True):
     """Convert single sided spectrum to time domain signal.
 
     Parameters
