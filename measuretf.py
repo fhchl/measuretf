@@ -11,7 +11,7 @@ from tqdm import tqdm
 """EXITATION SIGNALS"""
 
 
-def exponential_sweep(T, fs, tfade=0.05, f_start=None, f_end=None):
+def exponential_sweep(T, fs, tfade=0.05, f_start=None, f_end=None, maxamp=0.95):
     """Generate exponential sweep.
 
     Sweep constructed in time domain as described by `Farina`_ plus windowing.
@@ -51,9 +51,10 @@ def exponential_sweep(T, fs, tfade=0.05, f_start=None, f_end=None):
     t = np.linspace(0, T, n_tap)
     sweep = np.sin(w_start * T / np.log(w_end / w_start) *
                    (np.exp(t / T * np.log(w_end / w_start)) - 1))
-    sweep = sweep * 0.95  # some buffer in amplitude
+    sweep = sweep * maxamp  # some buffer in amplitude
 
     # fade beginning and end
+    # TODO: just use a tukey window here
     n_fade = round(tfade * fs)
     fading_window = hann(2 * n_fade)
     sweep[:n_fade] = sweep[:n_fade] * fading_window[:n_fade]
@@ -339,7 +340,6 @@ def convert_TDRmat_recording_to_npz(fname, output_folder=None):
     newpath = parent / path.stem
 
     np.savez(newpath, recs=recs, fs=fs, n_ch=n_ch, n_tap=n_tap)
-    #import ipdb; ipdb.set_trace()
 
 
 def folder_convert_TDRmat_recording_to_npz(
