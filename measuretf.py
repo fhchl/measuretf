@@ -1,17 +1,22 @@
-"""Measurement signals."""
+"""Measurement signals.
+"""
 
 import numpy as np
 import matplotlib.pyplot as plt
-
+import sounddevice as sd
 from pathlib import Path
 from scipy.signal import hann, butter, lfilter, get_window, convolve
 from scipy.io import loadmat
-
 from tqdm import tqdm
+from sfcf.response import Response
+
+
 """EXITATION SIGNALS"""
 
 
-def exponential_sweep(T, fs, tfade=0.05, f_start=None, f_end=None, maxamp=0.95):
+def exponential_sweep(
+    T, fs, tfade=0.05, f_start=None, f_end=None, maxamp=0.95, post_silence=0
+):
     """Generate exponential sweep.
 
     Sweep constructed in time domain as described by `Farina`_ plus windowing.
@@ -49,18 +54,41 @@ def exponential_sweep(T, fs, tfade=0.05, f_start=None, f_end=None, maxamp=0.95):
 
     # constuct sweep
     t = np.linspace(0, T, n_tap)
-    sweep = np.sin(w_start * T / np.log(w_end / w_start) *
-                   (np.exp(t / T * np.log(w_end / w_start)) - 1))
+    sweep = np.sin(
+        w_start
+        * T
+        / np.log(w_end / w_start)
+        * (np.exp(t / T * np.log(w_end / w_start)) - 1)
+    )
     sweep = sweep * maxamp  # some buffer in amplitude
 
-    # fade beginning and end
-    # TODO: just use a tukey window here
-    n_fade = round(tfade * fs)
-    fading_window = hann(2 * n_fade)
-    sweep[:n_fade] = sweep[:n_fade] * fading_window[:n_fade]
-    sweep[-n_fade:] = sweep[-n_fade:] * fading_window[-n_fade:]
+    if tfade:
+        # TODO: just use a tukey window here
+        n_fade = round(tfade * fs)
+        fading_window = hann(2 * n_fade)
+        sweep[:n_fade] = sweep[:n_fade] * fading_window[:n_fade]
+        sweep[-n_fade:] = sweep[-n_fade:] * fading_window[-n_fade:]
+
+    if post_silence > 0:
+        silence = np.zeros(int(round(post_silence * fs)))
+        sweep = np.concatenate((sweep, silence))
 
     return sweep
+
+
+from scipy.signal import max_len_seq
+
+
+def mls(order, fs):
+    # FIX: doesn't work
+    mls = 2*(max_len_seq(order)[0].astype(float) - 0.5)
+    print(mls)
+    f = frequency_vector(mls.size, fs)
+    M = np.fft.rfft(mls)
+    #M[1:] = M[1:] / f[1:]
+    m = np.fft.irfft(M)
+    m /= np.max(m)
+    return m
 
 
 def pink_noise(T, fs, tfade=0.1, flim=(5, 20e3)):
@@ -95,7 +123,7 @@ def pink_noise(T, fs, tfade=0.1, flim=(5, 20e3)):
     x = np.fft.irfft(X)
 
     # bandpass
-    b, a = butter(4, flim / (fs / 2), 'bandpass')
+    b, a = butter(4, flim / (fs / 2), "bandpass")
     x = lfilter(b, a, x)
 
     # fade beginning and end
@@ -103,6 +131,8 @@ def pink_noise(T, fs, tfade=0.1, flim=(5, 20e3)):
     fading_window = hann(2 * n_fade)
     x[:n_fade] = x[:n_fade] * fading_window[:n_fade]
     x[-n_fade:] = x[-n_fade:] * fading_window[-n_fade:]
+
+    x /= x.max() * 1.01
 
     return x
 
@@ -157,13 +187,14 @@ def transfer_function(ref, meas, ret_time=True, axis=-1):
         Transfer-function between ref and
         meas.
     """
-    assert ref.shape == meas.shape
-    n = ref.shape[axis]
+    assert meas.shape[axis] == ref.shape[axis]
+
     R = np.fft.rfft(ref, axis=axis)  # no need for normalization because
     Y = np.fft.rfft(meas, axis=axis)  # of division
     H = Y / (R + np.spacing(1))  # avoid devided-by-zero errors
+
     if ret_time:
-        h = np.fft.irfft(H, axis=axis, n=n)
+        h = np.fft.irfft(H, axis=axis, n=ref.shape[axis])
         return h
     else:
         return H
@@ -193,9 +224,9 @@ def multi_transfer_function(recs, ref_ch=0, ret_time=True):
     for avg in range(n_avg):
         for ch in range(n_ch):
             for ls in range(n_ls):
-                tfs[ch, ls] += transfer_function(recs[ref_ch, ls, avg],
-                                                 recs[ch, ls, avg],
-                                                 ret_time=ret_time) / n_avg
+                tfs[ch, ls] += transfer_function(
+                    recs[ref_ch, ls, avg], recs[ch, ls, avg], ret_time=ret_time
+                ) / n_avg
     return tfs
 
 
@@ -217,7 +248,7 @@ def header_info(fname):
         Nuber of Channels
     """
     data = loadmat(fname, struct_as_record=False, squeeze_me=True)
-    fh = data['File_Header']
+    fh = data["File_Header"]
 
     fs = int(float(fh.SampleFrequency))
     n_tap = int(fh.NumberOfSamplesPerChannel)
@@ -247,7 +278,7 @@ def load_mat_recording(fname, n_ls=1, n_avg=1, fullout=False):
         Sampling frequency.
     """
     data = loadmat(fname, struct_as_record=False, squeeze_me=True)
-    fh = data['File_Header']
+    fh = data["File_Header"]
     n_ch = int(fh.NumberOfChannels)
     fs = int(float(fh.SampleFrequency))  # only int() doesn't work ...
     n_tap = int(int(fh.NumberOfSamplesPerChannel) / n_ls / n_avg)
@@ -255,7 +286,7 @@ def load_mat_recording(fname, n_ls=1, n_avg=1, fullout=False):
     recs = np.zeros((n_ch, n_ls, n_avg, n_tap))
     for i in range(n_ch):
         # shape (N*n_avg*n_ls, ) -> (n_avg, N*n_ls)
-        temp = np.array(np.split(data['Channel_{}_Data'.format(i + 1)], n_avg))
+        temp = np.array(np.split(data["Channel_{}_Data".format(i + 1)], n_avg))
         recs[i] = np.array(np.split(temp, n_ls, axis=1))  # (n_ls, n_avg, N)
 
     if fullout:
@@ -286,10 +317,10 @@ def load_npz_recording(fname, n_ls=1, n_avg=1, fullout=False):
     """
 
     with np.load(fname) as data:
-        fs = data['fs']
-        n_otap = data['n_tap']
-        n_ch = data['n_ch']
-        orecs = data['recs']
+        fs = data["fs"]
+        n_otap = data["n_tap"]
+        n_ch = data["n_ch"]
+        orecs = data["recs"]
 
     n_tap = n_otap / n_ls / n_avg
     if n_tap.is_integer():
@@ -324,7 +355,7 @@ def convert_TDRmat_recording_to_npz(fname, output_folder=None):
         Save in this folder, instead of same folder as fname (default)
     """
     data = loadmat(fname, struct_as_record=False, squeeze_me=True)
-    fh = data['File_Header']
+    fh = data["File_Header"]
     n_ch = int(fh.NumberOfChannels)
     fs = int(float(fh.SampleFrequency))  # only int() doesn't work ...
     n_tap = int(int(fh.NumberOfSamplesPerChannel))
@@ -332,7 +363,7 @@ def convert_TDRmat_recording_to_npz(fname, output_folder=None):
     recs = np.zeros((n_ch, n_tap))
 
     for i in range(n_ch):
-        recs[i] = np.array(data['Channel_{}_Data'.format(i + 1)])
+        recs[i] = np.array(data["Channel_{}_Data".format(i + 1)])
 
     # remove .mat suffix
     path = Path(fname)
@@ -342,10 +373,7 @@ def convert_TDRmat_recording_to_npz(fname, output_folder=None):
     np.savez(newpath, recs=recs, fs=fs, n_ch=n_ch, n_tap=n_tap)
 
 
-def folder_convert_TDRmat_recording_to_npz(
-        path,
-        output_folder=None,
-):
+def folder_convert_TDRmat_recording_to_npz(path, output_folder=None):
     """Convert all .mat recording in folder into npz format.
 
     Parameters
@@ -359,24 +387,24 @@ def folder_convert_TDRmat_recording_to_npz(
     folder : None or Path, optional
         Save in this folder, instead of same folder as fname (default)
     """
-    files = Path(path).glob('*.mat')
+    files = Path(path).glob("*.mat")
     for f in tqdm(list(files)):
         convert_TDRmat_recording_to_npz(f, output_folder=output_folder)
 
 
 def transfer_functions_from_recordings(
-        fp,
-        n_ls,
-        n_meas,
-        fformat='Recording-{}.mat',
-        n_avg=1,
-        ref_ch=0,
-        lowpass_lim=None,
-        lowpass_butt=None,
-        twindow=None,
-        take_T=None,
-        H_comp=None,
-        T_comp=None,
+    fp,
+    n_ls,
+    n_meas,
+    fformat="Recording-{}.mat",
+    n_avg=1,
+    ref_ch=0,
+    lowpass_lim=None,
+    lowpass_butt=None,
+    twindow=None,
+    take_T=None,
+    H_comp=None,
+    T_comp=None,
 ):
     """Calculate transfer-functions from a set of recordings inside a folder.
 
@@ -416,15 +444,15 @@ def transfer_functions_from_recordings(
     # read meta data from first recording
     # TODO: use load_recording funcs here
     fname = fpath / fformat.format(1)
-    if fname.suffix == '.mat':
+    if fname.suffix == ".mat":
         fs, n_tap, n_ch = header_info(fname)
-    elif fname.suffix == '.npz':
+    elif fname.suffix == ".npz":
         with np.load(fname) as data:
-            fs = data['fs']
-            n_tap = data['n_tap']
-            n_ch = data['n_ch']
+            fs = data["fs"]
+            n_tap = data["n_tap"]
+            n_ch = data["n_ch"]
     else:
-        raise ValueError('Neither mat nor npz file.')
+        raise ValueError("Neither mat nor npz file.")
 
     if take_T is not None:
         # only take first take_T seconds of impulse responses
@@ -438,9 +466,9 @@ def transfer_functions_from_recordings(
         fname = fpath / fformat.format(i + 1)
 
         # load time domain recordings
-        if Path(fname).suffix == '.mat':
+        if Path(fname).suffix == ".mat":
             temp, fs = load_mat_recording(fname, n_ls=n_ls, n_avg=n_avg)
-        elif Path(fname).suffix == '.npz':
+        elif Path(fname).suffix == ".npz":
             temp, fs = load_npz_recording(fname, n_ls=n_ls, n_avg=n_avg)
         else:
             raise ValueError()
@@ -476,7 +504,7 @@ def transfer_functions_from_recordings(
         if lowpass_butt is not None:
             # filter HF noise with butterworth
             order, cutoff = lowpass_butt
-            b, a = butter(order, cutoff / (fs / 2), 'low')
+            b, a = butter(order, cutoff / (fs / 2), "low")
             temp = lfilter(b, a, temp, axis=-1)
 
         if twindow is not None:
@@ -492,21 +520,187 @@ def cut_recording(fname, cuts, names=None, remove_orig=False, outfolder=None):
     """Cut recordings at samples.
     """
     data = np.load(fname)
-    recs = np.split(data['recs'], cuts, axis=-1)
+    recs = np.split(data["recs"], cuts, axis=-1)
     path = Path(fname)
 
     for i, r in enumerate(recs):
-        add = '-{}'.format(names[i] if names is not None else i)
+        add = "-{}".format(names[i] if names is not None else i)
         parent = Path(outfolder) if outfolder is not None else path.parent
         newpath = parent / (path.stem + add)
-        np.savez(
-            newpath, recs=r, fs=data['fs'], n_ch=r.shape[0], n_tap=r.shape[1])
+        np.savez(newpath, recs=r, fs=data["fs"], n_ch=r.shape[0], n_tap=r.shape[1])
 
     data.close()
 
     if remove_orig:
         # remove original files
         path.unlink()
+
+
+"""TF measurement"""
+
+
+def measure_single_output_impulse_response(
+    sound,
+    fs,
+    out_ch=1,
+    in_ch=1,
+    ref_ch_indx=None,
+    ref_sound_indx=None,
+    calibration_gains=None,
+    **sd_kwargs,
+):
+    """Meassure impulse response between single output and multiple inputs.
+
+    Parameters
+    ----------
+    sound : ndarray, shape (nt,)
+        Excitation signal
+    fs : int
+        Sampling rate of sound
+    out_ch : int, optional
+        Output channel
+    in_ch : int or list, optional
+        List of input channels
+    ref_ch_indx : None or int, optional
+        Index of reference channel in in_ch. If none, take sound as reference.
+
+    Returns
+    -------
+    ndarray, shape (n_in, nt)
+        Impulse response between output channel and input channels
+    """
+    out_ch = np.atleast_1d(out_ch)
+    in_ch = np.atleast_1d(in_ch)
+
+    if sound.ndim > 1:
+        if ref_sound_indx is None and ref_ch_indx is None:
+            raise ValueError("Select a reference with ref_sound_indx or ref_ch_indx.")
+
+        if ref_sound_indx is not None:
+            assert np.atleast_2d(sound).shape[1] - 1 == out_ch.size
+            ref = sound[:, ref_sound_indx][:, None]
+            sound = np.delete(sound, ref_sound_indx, axis=-1)
+        else:
+            assert np.atleast_2d(sound).shape[1] == out_ch.size
+
+    # make copies of mapping because of
+    # github.com/spatialaudio/python-sounddevice/issues/135
+    rec = sd.playrec(
+        sound,
+        samplerate=fs,
+        input_mapping=in_ch.copy(),
+        output_mapping=out_ch.copy(),
+        blocking=True,
+        **sd_kwargs,
+    )
+
+    if calibration_gains is not None:
+        calibration_gains = np.atleast_1d(calibration_gains)
+        rec = rec * calibration_gains
+
+    if ref_ch_indx is not None and ref_sound_indx is not None:
+        raise ValueError("Cannot specify reference in input channel and sound file.")
+    elif ref_ch_indx is not None:
+        # use one of the input channels as reference
+        ref = rec[:, ref_ch_indx][:, None]
+        meas = np.delete(rec, ref_ch_indx, axis=-1)
+    elif ref_sound_indx is not None:
+        # use on of the sound file channels as reference
+        meas = rec
+        # ref was set above
+    else:
+        # just use the sound as reference
+        meas = rec
+        ref = sound[:, None]
+
+    return transfer_function(ref, meas, axis=0).T
+
+
+def measure_multi_output_impulse_respone(
+    sound,
+    fs_sound,
+    out_ch,
+    in_ch,
+    ref_ch_indx=None,
+    fs_resample=None,
+    n_avg=1,
+    tcut=None,
+    timewindow=None,
+    lowpass=None,
+    calibration_gains=None,
+    **sd_kwargs,
+):
+    """Meassure impulse response between multiple outputs and multiple inputs.
+
+    Parameters
+    ----------
+    sound : TYPE
+        Description
+    fs_sound : TYPE
+        Description
+    out_ch : TYPE
+        Description
+    in_ch : TYPE
+        Description
+    ref_ch_indx : None, optional
+        Description
+    fs_resample : None, optional
+        Description
+    n_avg : int, optional
+        Description
+    tcut : None, optional
+        Description
+    timewindow : None, optional
+        Description
+    lowpass : None, optional
+        Description
+    **sd_kwargs
+        Description
+
+    Returns
+    -------
+    ndarray, shape (n_out, n_in, n_t)
+        Description
+    """
+    out_ch = np.atleast_1d(out_ch)
+    in_ch = np.atleast_1d(in_ch)
+
+    irs = []
+
+    for i, oc in enumerate(out_ch):
+        ir = 0
+        fs = fs_sound
+        for j in range(n_avg):
+            ir += measure_single_output_impulse_response(
+                sound,
+                fs_sound,
+                out_ch=oc,
+                in_ch=in_ch,
+                ref_ch_indx=ref_ch_indx,
+                calibration_gains=calibration_gains,
+                **sd_kwargs,
+            ) / n_avg
+
+        if tcut is not None:
+            ir = Response.from_time(fs, ir).timecrop(0, tcut).in_time
+
+        if lowpass is not None:
+            ir = Response.from_time(fs, ir).lowpass_by_frequency_domain_window(
+                *lowpass
+            ).in_time
+
+        if timewindow is not None:
+            ir = Response.from_time(fs, ir).time_window(*timewindow).in_time
+
+        if fs_resample is not None:
+            # TODO: use resample_poly
+            ir = Response.from_time(fs, ir).resample(fs_resample).in_time  # (nin, nt)
+
+        irs.append(ir)
+
+    irs = np.stack(irs, axis=0)  # shape (nout, nin, nt)
+
+    return irs
 
 
 """NON_LINEAR"""
@@ -532,7 +726,8 @@ def exponential_sweep_harmonic_delay(T, fs, N, f_start=None, f_end=None):
         Description
 
     .. _Farina:
-       A. Farina, “Simultaneous measurement of impulse response and distortion
+       A. Farina, “Simultaneous 
+       of impulse response and distortion
        with a swept-sine techniqueMinnaar, Pauli,” in Proc. AES 108th conv,
        Paris, France, 2000, pp. 1–15.
     """
@@ -571,7 +766,7 @@ def harmonic_spectrum(r, fs, order=10):
     T = n / fs
 
     # find max and circshift it to tap 0
-    r = np.roll(r, -np.argmax(np.abs(r)**2))
+    r = np.roll(r, -np.argmax(np.abs(r) ** 2))
 
     # delays of non-linear components
     dts = exponential_sweep_harmonic_delay(T, fs, orders)
@@ -583,14 +778,14 @@ def harmonic_spectrum(r, fs, order=10):
     # fundamental
     n_start = int(round((dns[1] + dns[0]) / 2))
     n_end = int(round((dns[-1] / 2)))
-    e[0] = np.sum(np.abs(r[n_start:])**2)
-    e[0] += np.sum(np.abs(r[:n_end])**2)
+    e[0] = np.sum(np.abs(r[n_start:]) ** 2)
+    e[0] += np.sum(np.abs(r[:n_end]) ** 2)
 
     # higher order
     for i in orders[:-2]:
         n_start = int(round((dns[i + 1] + dns[i]) / 2))
         n_end = int(round((dns[i] + dns[i - 1]) / 2))
-        e[i] = np.sum(np.abs(r[n_start:n_end])**2)
+        e[i] = np.sum(np.abs(r[n_start:n_end]) ** 2)
 
     return e
 
@@ -667,14 +862,15 @@ def lowpass_by_frequency_domain_window(fs, x, fstart, fstop, axis=-1):
     X_windowed = np.fft.rfft(x, axis=axis)
     X_windowed = np.moveaxis(X_windowed, axis, 0)
     X_windowed[windowed_samples] = (
-        X_windowed[windowed_samples].T * half_window.T).T  # broadcasting
+        X_windowed[windowed_samples].T * half_window.T
+    ).T  # broadcasting
     X_windowed[stop:] = 0
     X_windowed = np.moveaxis(X_windowed, 0, axis)
 
     return np.fft.irfft(X_windowed, n=n)
 
 
-def time_window(fs, n, startwindow, stopwindow, window='hann'):
+def time_window(fs, n, startwindow, stopwindow, window="hann"):
     """Create a time window.
     """
 
@@ -732,7 +928,7 @@ def mutliconvolve(sound, h, plot=False):
 """FFT FUNCS"""
 
 
-def frequency_vector(n, fs, sided='single'):
+def frequency_vector(n, fs, sided="single"):
     """Frequency values of filter with n taps sampled at fs up to Nyquist.
 
     Parameters
@@ -750,12 +946,12 @@ def frequency_vector(n, fs, sided='single'):
     ALTERNATIVELY:
         np.abs(np.fft.fftfreq(n, 1)[:n // 2 + 1])
     """
-    if sided == 'single':
-        f = np.arange(n // 2 + 1) * fs / n
-    elif sided == 'double':
-        f = np.arange(n) * fs / n
+    if sided == "single":
+        f = np.arange(n // 2 + 1, dtype=float) * fs / n
+    elif sided == "double":
+        f = np.arange(n, dtype=float) * fs / n
     else:
-        raise ValueError('Invalid value for sided.')
+        raise ValueError("Invalid value for sided.")
     return f
 
 
@@ -776,7 +972,7 @@ def time_vector(n, fs):
 
     """
     T = 1 / fs
-    return np.arange(n) * T
+    return np.arange(n, dtype=float) * T
 
 
 def amplitude_spectrum(x, axis=-1, norm=True):
@@ -899,7 +1095,7 @@ def find_nearest(array, value):
     return array[idx], idx
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
     # test pink noise
