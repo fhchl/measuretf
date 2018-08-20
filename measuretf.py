@@ -1,5 +1,4 @@
-"""Measurement signals.
-"""
+"""Collection of functions for transfer-function measurements."""
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -17,14 +16,14 @@ from scipy.signal import (
     flattop,
     csd,
     welch,
+    correlate,
 )
 from scipy.io import loadmat, wavfile
 from tqdm import tqdm
 from response import Response
 
 
-"""EXITATION SIGNALS"""
-
+# EXITATION SIGNALS
 
 def exponential_sweep(
     T, fs, tfade=0.05, f_start=None, f_end=None, maxamp=0.95, post_silence=0
@@ -192,6 +191,8 @@ def multichannel_serial_sound(sound, n_ch, reference=False):
     return msound
 
 
+# ESTIMATE TRANSFER FUNCTIONS
+
 def transfer_function(ref, meas, ret_time=True, axis=-1, fwindow=None):
     """Compute transfer-function between time domain signals.
 
@@ -227,17 +228,25 @@ def transfer_function(ref, meas, ret_time=True, axis=-1, fwindow=None):
         return H
 
 
-def transfer_function_csd(x, y, fs, axis=-1, **kwargs):
+def transfer_function_csd(
+    x, y, fs, compensate_delay=True, fwindow=None, **kwargs
+):
     """Compute transfer-function between time domain signals.
+
+    Delay compensation mentioned e.g. in S. Muller, A. E. S. Member, and P. Massarani,
+    “Transfer-Function Measurement with Sweeps.”
+
 
     Parameters
     ----------
     x, y : ndarray, float
-        Reference and measured signal.
+        Reference and measured signal in one dimensional arrays of same length.
     fs : int
         Sampling frequency
-    axis : int, optional
-        Axis along which TF is computed
+    compensate_delay: optional, bool
+        Compensate for delays in correlation estimations.
+    fwindow: optional, tuple
+        Frequency limits of frequency domain window to be applied after TF estimation.
     **kwargs
         Kwargs are fed to csd and welch functions.
 
@@ -249,12 +258,45 @@ def transfer_function_csd(x, y, fs, axis=-1, **kwargs):
         Transfer-function between ref and
         meas.
     """
-    assert x.shape[axis] == y.shape[axis]
+    assert x.ndim == 1
+    assert y.ndim == 1
+    assert x.size == y.size
 
-    f, S_xy = csd(x, y, fs=fs, axis=axis, **kwargs)
-    _, S_xx = welch(x, fs=fs, axis=axis, **kwargs)
+    if compensate_delay:
+        n = x.size
+
+        # delta time array to match xcorr
+        s = np.arange(1 - n, n)
+
+        # cross correlation
+        xcorr = correlate(y, x, mode="full")
+
+        # estimate delay in time
+        dt = s[xcorr.argmax()] / fs
+
+        # match both responses in time and length
+        if dt >= 0:
+            x = Response.from_time(fs, x).delay(dt, keep_length=False).in_time
+            y = Response.from_time(fs, y).zeropad_to_length(x.size).in_time
+        else:
+            x = Response.from_time(fs, x).zeropad_to_length(y.size).in_time
+            y = Response.from_time(fs, y).delay(-dt, keep_length=False).in_time
+
+    f, S_xy = csd(x, y, fs=fs, **kwargs)
+    _, S_xx = welch(x, fs=fs, **kwargs)
 
     H = S_xy / S_xx
+
+    if compensate_delay:
+        # reintroduce delay
+        H *= np.exp(-1j * 2 * np.pi * f * dt)
+
+    if fwindow is not None:
+        startwindow, stopwindow = fwindow
+        fs_new = 2 * int(f[-1])
+        n_new = (H.shape[-1] - 1) * 2
+        W = freq_window(fs_new, n_new, startwindow, stopwindow)
+        H *= W
 
     return f, H
 
@@ -291,6 +333,8 @@ def multi_transfer_function(recs, ref_ch=0, ret_time=True):
                 )
     return tfs
 
+
+# B&K TIME DATA RECORDER PROCESSING
 
 def header_info(fname):
     """Header information of MAT-file exported by Time Data Recorder.
@@ -598,8 +642,8 @@ def cut_recording(fname, cuts, names=None, remove_orig=False, outfolder=None):
         path.unlink()
 
 
-"""TF measurement"""
 
+# TF MEASUREMENT
 
 def measure_single_output_impulse_response(
     sound,
@@ -770,8 +814,7 @@ def measure_multi_output_impulse_respone(
     return irs
 
 
-"""RECORD EXCITATIONS"""
-
+# RECORD EXCITATIONS
 
 def record_single_output_excitation(sound, fs, out_ch=1, in_ch=1, **sd_kwargs):
     """Meassure impulse response between single output and multiple inputs.
@@ -947,8 +990,7 @@ def saverec_recording(
     return recs
 
 
-"""KFF18"""
-
+# FOR KFF18
 
 def plot_rec(fs, recs):
     """Plot a recording."""
@@ -1028,7 +1070,7 @@ def convert_wav_to_rec(
     return recs, fs
 
 
-def transfer_function_with_reference(recs, fs, fwindow=None, ref=0):
+def transfer_function_with_reference(recs, fwindow=None, ref=0):
     """Transfer-function between multichannel recording and reference channels.
 
     Parameters
@@ -1063,50 +1105,6 @@ def transfer_function_with_reference(recs, fs, fwindow=None, ref=0):
     return tfs
 
 
-def transfer_function_with_reference2(
-    recs, fwindow=None, ref=0, tf_mode="naive", **csd_kwargs
-):
-    """Transfer-function between multichannel recording and reference channels.
-
-    Parameters
-    ----------
-    recs : ndarray, shape (no, ni, nt)
-        Multichannel recording.
-    ref : int or sound
-        Index of reference channel in recs or the digital reference signal of shape
-        (no, nt)
-
-    Returns
-    -------
-    ndarray, shape (no, ni, nt)
-        Transfer function between reference and measured signals in time
-        domain.
-    """
-    no, ni, nt = recs.shape
-    tfs = np.zeros((no, ni, nt))
-    for o in range(no):
-        for i in range(ni):
-            if isinstance(ref, int):
-                # ref is reference channel
-                r = recs[o, ref]
-            elif isinstance(ref, list):
-                r = recs[o, ref[o]]
-            else:
-                # ref is reference sound
-                r = ref
-            if tf_mode == "naive":
-                tfs[o, i] = transfer_function(
-                    r, recs[o, i], ret_time=True, fwindow=fwindow
-                )
-            elif tf_mode == "csd":
-                f, H = transfer_function_csd(r, recs[o, i], fs, **csd_kwargs)
-                tfs[o, i] = np.fft.irfft(H)
-            else:
-                raise ValueError("tf_mode {} not known".format(tf_mode))
-
-    return tfs
-
-
 def tf_and_post_from_saved_rec(
     fname,
     tcut=None,
@@ -1116,21 +1114,12 @@ def tf_and_post_from_saved_rec(
     plot=False,
     ref=None,
     calibration_gain=None,
-    tf_mode="naive",
 ):
-
     with np.load(fname) as data:
         recs = data["recs"]  # shape (n_out, n_in, nt)
         fs = int(data["fs"])
         ref_ch = data["ref_ch"]
         sound = data["sound"]
-
-    if ref is None:
-        if ref_ch is not None:
-            ref = int(ref_ch)
-        else:
-            # NOTE: no calibration!
-            ref = sound
 
     if calibration_gain is not None:
         recs = recs * np.asarray(calibration_gain)[None, :, None]
@@ -1141,9 +1130,17 @@ def tf_and_post_from_saved_rec(
     if fwindow is not None:
         fwindow = (fs, *fwindow)
 
-    irs = transfer_function_with_reference(
-        recs, ref=ref, fwindow=fwindow
-    )
+    if ref is None:
+        # use sound or reference channel
+        if ref_ch is not None:
+            # use reference channel
+            ref = int(ref_ch)
+        else:
+            # Use sound
+            # NOTE: no calibration!
+            ref = sound
+
+    irs = transfer_function_with_reference(recs, ref=ref, fwindow=fwindow)
 
     if plot:
         Response.from_time(fs, irs).plot(figsize=(10, 10))
@@ -1170,6 +1167,103 @@ def tf_and_post_from_saved_rec(
 
         if plot:
             Response.from_time(fs, irs).plot(figsize=(10, 10))
+    return fs, irs
+
+
+def tf_and_post_from_saved_rec_csd(
+    fname,
+    tcut=None,
+    twindow=None,
+    rec_twindow=None,
+    fs_resample=None,
+    fwindow=None,
+    plot=False,
+    ref_ch=None,
+    calibration_gain=None,
+    nperseg=256,
+    mode="csd",
+    **csd_kwargs,
+):
+
+    assert nperseg % 2 == 0
+
+    with np.load(fname) as data:
+        recs = data["recs"]  # shape (n_out, n_in, nt)
+        fs = int(data["fs"])
+        ref_ch_npz = data["ref_ch"]
+
+    if plot:
+        fig = Response.from_time(fs, recs).plot(figsize=(10, 10), slce=plot)
+        fig.suptitle("Recording")
+
+    if calibration_gain is not None:
+        recs = recs * np.asarray(calibration_gain)[None, :, None]
+
+        if plot:
+            fig = Response.from_time(fs, recs).plot(figsize=(10, 10), slce=plot)
+            fig.suptitle("After calibration")
+
+    # apply time window to recordings
+    if rec_twindow is not None:
+        recs = Response.from_time(fs, recs).time_window(*rec_twindow).in_time
+
+        if plot:
+            fig = Response.from_time(fs, recs).plot(figsize=(10, 10), slce=plot)
+            fig.suptitle("After rec_twindow")
+
+    if fs_resample is not None:
+        recs = (
+            Response.from_time(fs, recs)
+            .resample_poly(fs_resample, keep_gain=False)
+            .in_time
+        )
+        fs = int(fs_resample)
+
+        if plot:
+            fig = Response.from_time(fs, recs).plot(figsize=(10, 10), slce=plot)
+            fig.suptitle("After resampling")
+
+    if ref_ch is None:
+        ref_ch = ref_ch_npz
+
+    # compute irs
+    no, ni, nt = recs.shape
+    if nperseg and mode == "csd":
+        nt = nperseg
+    irs = np.zeros((no, ni, nt))
+    for o in range(no):
+        for i in range(ni):
+            x = recs[o, ref_ch]
+            y = recs[o, i]
+            if mode == "csd":
+                f, H = transfer_function_csd(
+                    x, y, fs, nperseg=nperseg, fwindow=fwindow, **csd_kwargs
+                )
+                irs[o, i] = np.fft.irfft(H)
+            elif mode == "naive":
+                irs[o, i] = transfer_function(x, y, fwindow=(fs, *fwindow))
+            else:
+                raise ValueError
+
+    if mode == "csd":
+        fs = 2 * int(f[-1])  # NOTE: assumes even nperseg
+
+    if plot:
+        fig = Response.from_time(fs, irs).plot(figsize=(10, 10), slce=plot)
+        fig.suptitle("IRS")
+
+    # apply time window to impulse response
+    if twindow is not None:
+        irs = Response.from_time(fs, irs).time_window(*twindow).in_time
+
+        if plot:
+            Response.from_time(fs, irs).plot(figsize=(10, 10), slce=plot)
+
+    if tcut is not None:
+        irs = Response.from_time(fs, irs).timecrop(0, tcut).in_time
+
+        if plot:
+            Response.from_time(fs, irs).plot(figsize=(10, 10), slce=plot)
     return fs, irs
 
 
@@ -1301,7 +1395,7 @@ def calibration_gain_from_recording(fname_rec, mic_channel, L_calib=94, plot=Fal
     return calibration_gain
 
 
-"""NON_LINEAR"""
+# NON-LINEAR
 
 
 def exponential_sweep_harmonic_delay(T, fs, N, f_start=None, f_end=None):
@@ -1409,8 +1503,7 @@ def thd(r, fs, order=10):
     return np.sqrt(np.sum(e[1:]) / e[0])
 
 
-"""FILTERING"""
-
+# FILTERING
 
 def lowpass_by_frequency_domain_window(fs, x, fstart, fstop, axis=-1):
     """Summary
@@ -1557,8 +1650,7 @@ def mutliconvolve(sound, h, plot=False):
     return convsound
 
 
-"""FFT FUNCS"""
-
+# FFT FUNCS
 
 def frequency_vector(n, fs, sided="single"):
     """Frequency values of filter with n taps sampled at fs up to Nyquist.
@@ -1718,25 +1810,9 @@ def inverse_amplitude_spectrum(X, isEvenSampled=True, axis=-1, norm=True):
     return x
 
 
-"""UTILS"""
-
+# UTILS
 
 def find_nearest(array, value):
     """Find nearest value in an array and its index."""
     idx = (np.abs(array - value)).argmin()
     return array[idx], idx
-
-
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-
-    # test pink noise
-    T = 10
-    fs = 44100
-    n = pink_noise(T, fs)
-    t = np.linspace(0, T, T * fs)
-    f = np.linspace(0, fs / 2, T * fs // 2 + 1)
-    plt.figure()
-    plt.plot(t, n)
-    plt.figure()
-    plt.semilogx(f, 20 * np.log10(np.abs(np.fft.rfft(n))))
