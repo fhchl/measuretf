@@ -62,6 +62,9 @@ def exponential_sweep(
     if f_end is None:
         f_end = fs / 2
 
+    assert f_start < f_end
+    assert f_end <= fs / 2
+
     w_start = 2 * np.pi * f_start
     w_end = 2 * np.pi * f_end
 
@@ -193,7 +196,7 @@ def multichannel_serial_sound(sound, n_ch, reference=False):
 
 # ESTIMATE TRANSFER FUNCTIONS
 
-def transfer_function(ref, meas, ret_time=True, axis=-1, fwindow=None):
+def transfer_function(ref, meas, ret_time=True, axis=-1, fwindow=None, fftwindow=None):
     """Compute transfer-function between time domain signals.
 
     Parameters
@@ -209,6 +212,22 @@ def transfer_function(ref, meas, ret_time=True, axis=-1, fwindow=None):
         Transfer-function between ref and
         meas.
     """
+    if fftwindow:
+        print("fftwindowing!")
+        w = tukey(ref.shape[axis], alpha=0.1)
+        #ref = np.moveaxis(ref, axis, -1)
+        meas = np.moveaxis(meas, axis, -1)
+        #ref = ref * w
+        meas = meas * w
+        #ref = np.moveaxis(ref, -1, axis)
+        meas = np.moveaxis(meas, -1, axis)
+
+#    plt.figure()
+#    plt.plot(ref)
+#    plt.figure()
+#    plt.plot(meas)
+#    plt.show()
+
     R = np.fft.rfft(ref, axis=axis)  # no need for normalization because
     Y = np.fft.rfft(meas, axis=axis)  # of division
 
@@ -219,6 +238,7 @@ def transfer_function(ref, meas, ret_time=True, axis=-1, fwindow=None):
         Y *= W
         Y = np.moveaxis(Y, -1, axis)
 
+    # R[R == 0] = np.median(R) * np.finfo(complex).eps  # avoid devision by zero
     H = Y / R
 
     if ret_time:
@@ -231,7 +251,7 @@ def transfer_function(ref, meas, ret_time=True, axis=-1, fwindow=None):
 def transfer_function_csd(
     x, y, fs, compensate_delay=True, fwindow=None, **kwargs
 ):
-    """Compute transfer-function between time domain signals.
+    """Compute transfer-function between time domain signals using Welch's method.
 
     Delay compensation mentioned e.g. in S. Muller, A. E. S. Member, and P. Massarani,
     “Transfer-Function Measurement with Sweeps.”
@@ -263,24 +283,7 @@ def transfer_function_csd(
     assert x.size == y.size
 
     if compensate_delay:
-        n = x.size
-
-        # delta time array to match xcorr
-        s = np.arange(1 - n, n)
-
-        # cross correlation
-        xcorr = correlate(y, x, mode="full")
-
-        # estimate delay in time
-        dt = s[xcorr.argmax()] / fs
-
-        # match both responses in time and length
-        if dt >= 0:
-            x = Response.from_time(fs, x).delay(dt, keep_length=False).in_time
-            y = Response.from_time(fs, y).zeropad_to_length(x.size).in_time
-        else:
-            x = Response.from_time(fs, x).zeropad_to_length(y.size).in_time
-            y = Response.from_time(fs, y).delay(-dt, keep_length=False).in_time
+        x, y, dt = time_align(x, y, fs)
 
     f, S_xy = csd(x, y, fs=fs, **kwargs)
     _, S_xx = welch(x, fs=fs, **kwargs)
@@ -642,7 +645,6 @@ def cut_recording(fname, cuts, names=None, remove_orig=False, outfolder=None):
         path.unlink()
 
 
-
 # TF MEASUREMENT
 
 def measure_single_output_impulse_response(
@@ -839,7 +841,7 @@ def record_single_output_excitation(sound, fs, out_ch=1, in_ch=1, **sd_kwargs):
     """
     out_ch = np.atleast_1d(out_ch)
     in_ch = np.atleast_1d(in_ch)
-
+    print(in_ch.copy())
     # make copies of mapping because of
     # github.com/spatialaudio/python-sounddevice/issues/135
     rec = sd.playrec(
@@ -937,7 +939,8 @@ def saverec_multi_output_excitation(
     )
 
     if add_datetime_to_name:
-        fn = filename + " - {}".format(datetime.now())
+        datetime_str = datetime.now().isoformat(' ', 'seconds').replace(':', '-')
+        fn = filename + " - " + datetime_str
     else:
         fn = filename
 
@@ -972,7 +975,8 @@ def saverec_recording(
     )
 
     if add_datetime_to_name:
-        fn = filename + " - {}".format(datetime.now())
+        datetime_str = datetime.now().isoformat(timespec='seconds').replace(':', '-')
+        fn = filename + " - " + datetime_str
     else:
         fn = filename
 
@@ -992,11 +996,11 @@ def saverec_recording(
 
 # FOR KFF18
 
-def plot_rec(fs, recs):
+def plot_rec(fs, recs, **plot_kwargs):
     """Plot a recording."""
     recs = np.atleast_3d(recs.T).T
     fig, ax = plt.subplots(
-        nrows=recs.shape[1], ncols=recs.shape[0], squeeze=False, figsize=(10, 10)
+        nrows=recs.shape[1], ncols=recs.shape[0], squeeze=False, **plot_kwargs
     )
     t = time_vector(recs.shape[-1], fs)
     for i in range(recs.shape[1]):
@@ -1005,20 +1009,27 @@ def plot_rec(fs, recs):
     return fig
 
 
-def load_rec(fname, plot=True):
-    """Show content of saved recording."""
+def load_rec(fname, plot=True, **plot_kwargs):
+    """Show content of saved recording.
+
+    Parameters
+    ----------
+    fname : path
+        Recording in npz format
+    plot : bool, optional
+        If true, plot recording
+
+    Returns
+    -------
+    recs, fs, ref_ch
+    """
     with np.load(fname) as data:
         recs = data["recs"]  # shape (n_out, n_in, nt)
         fs = int(data["fs"])
         ref_ch = data["ref_ch"]
-        sound = data["sound"]
-    print(
-        "{}: recs.shape: {}, fs: {}, ref_ch: {}, sound: {}".format(
-            fname, recs.shape, fs, ref_ch, sound
-        )
-    )
+
     if plot:
-        plot_rec(fs, recs)
+        plot_rec(fs, recs, **plot_kwargs)
     return recs, fs, ref_ch
 
 
@@ -1070,14 +1081,14 @@ def convert_wav_to_rec(
     return recs, fs
 
 
-def transfer_function_with_reference(recs, fwindow=None, ref=0):
+def transfer_function_with_reference(recs, fwindow=None, ref=0, fftwindow=None):
     """Transfer-function between multichannel recording and reference channels.
 
     Parameters
     ----------
     recs : ndarray, shape (no, ni, nt)
         Multichannel recording.
-    ref : int or sound
+    ref : int or or list of ints or ndarray
         Index of reference channel in recs or the digital reference signal of shape
         (no, nt)
 
@@ -1100,7 +1111,19 @@ def transfer_function_with_reference(recs, fwindow=None, ref=0):
                 # ref is reference sound
                 r = ref
 
-            tfs[o, i] = transfer_function(r, recs[o, i], ret_time=True, fwindow=fwindow)
+            tfs[o, i] = transfer_function(r, recs[o, i], ret_time=True, fwindow=fwindow, fftwindow=fftwindow)
+            """
+            print("fwindow", fwindow)
+            print("fftwindow", fftwindow)
+            print(o, i)
+            plt.figure()
+            plt.plot(r)
+            plt.figure()
+            plt.plot(recs[o, i])
+            plt.figure()
+            plt.plot(tfs[o, i])
+            raise Exception
+            """
 
     return tfs
 
@@ -1114,6 +1137,7 @@ def tf_and_post_from_saved_rec(
     plot=False,
     ref=None,
     calibration_gain=None,
+    fftwindow=None,
 ):
     with np.load(fname) as data:
         recs = data["recs"]  # shape (n_out, n_in, nt)
@@ -1140,7 +1164,7 @@ def tf_and_post_from_saved_rec(
             # NOTE: no calibration!
             ref = sound
 
-    irs = transfer_function_with_reference(recs, ref=ref, fwindow=fwindow)
+    irs = transfer_function_with_reference(recs, ref=ref, fwindow=fwindow, fftwindow=fftwindow)
 
     if plot:
         Response.from_time(fs, irs).plot(figsize=(10, 10))
@@ -1233,7 +1257,10 @@ def tf_and_post_from_saved_rec_csd(
     irs = np.zeros((no, ni, nt))
     for o in range(no):
         for i in range(ni):
-            x = recs[o, ref_ch]
+            if isinstance(ref_ch, list):  # NOTE: not tested!
+                x = recs[o, ref_ch[o]]
+            else:
+                x = recs[o, ref_ch]
             y = recs[o, i]
             if mode == "csd":
                 f, H = transfer_function_csd(
@@ -1267,15 +1294,18 @@ def tf_and_post_from_saved_rec_csd(
     return fs, irs
 
 
-def lanxi_reference_calibration_gain(danterec, lanxirec, ls_ch=0, plot=False):
+def lanxi_reference_calibration_gain(
+    danterec, lanxirec, ref_ch_dante=None, ref_ch_lanxi=None, ls_ch=0, plot=False
+):
+    """Compute calibration gain for lanxi reference channel."""
     with np.load(danterec) as data:
         fs = int(data["fs"])
-        ref_ch_dante = data["ref_ch"]
+        ref_ch_dante = data["ref_ch"] if ref_ch_dante is None else ref_ch_dante
         recs_dante = data["recs"][ls_ch, ref_ch_dante, :]
 
     with np.load(lanxirec) as data:
         fs_lanxi = int(data["fs"])
-        ref_ch_lanxi = data["ref_ch"]
+        ref_ch_lanxi = data["ref_ch"] if ref_ch_lanxi is None else ref_ch_lanxi
         recs_lanxi = data["recs"][ls_ch, ref_ch_lanxi, :]
 
     if fs_lanxi != fs:
@@ -1816,3 +1846,122 @@ def find_nearest(array, value):
     """Find nearest value in an array and its index."""
     idx = (np.abs(array - value)).argmin()
     return array[idx], idx
+
+
+def time_align(x, y, fs):
+    """Time align two signals, zeropad as necessary.
+
+    If `dt` is positive `x` was delayed and `y` zeropadded for same length.
+    """
+    n = x.size
+
+    # delta time array to match xcorr
+    s = np.arange(1 - n, n)
+
+    # cross correlation
+    xcorr = correlate(y, x, mode="full")
+
+    # estimate delay in time
+    dt = s[xcorr.argmax()] / fs
+
+    # match both responses in time and length
+    if dt >= 0:
+        x = Response.from_time(fs, x).delay(dt, keep_length=False).in_time
+        y = Response.from_time(fs, y).zeropad_to_length(x.size).in_time
+    else:
+        x = Response.from_time(fs, x).zeropad_to_length(y.size).in_time
+        y = Response.from_time(fs, y).delay(-dt, keep_length=False).in_time
+
+    return x, y, dt
+
+
+def time_align_y(x, y, fs):
+    """Time align y to match x.
+    """
+    n = x.size
+
+    # delta time array to match xcorr
+    s = np.arange(1 - n, n)
+
+    # cross correlation
+    xcorr = correlate(x, y, mode="full")
+
+    # estimate delay in time
+    dt = s[xcorr.argmax()] / fs
+
+    y = Response.from_time(fs, y).delay(dt, keep_length=True).in_time
+
+    return y, dt
+
+
+def coherence_csd(x, y, fs, compensate_delay=True, **csd_kwargs):
+    """Compute maginitude squared coherence of two signals using Welch's method.
+
+    Parameters
+    ----------
+    x, y : ndarray, float
+        Reference and measured signal in one dimensional arrays of same length.
+    fs : int
+        Sampling frequency
+    compensate_delay: optional, bool
+        Compensate for delays in correlation estimations.
+    **csd_kwargs
+        Kwargs are fed to csd and welch functions.
+
+    Returns
+    -------
+    f : ndarray
+        Array of sample frequencies.
+    gamma2 : ndarray
+        Magnitude squared coherence
+    """
+    assert x.ndim == 1
+    assert y.ndim == 1
+    assert x.size == y.size
+
+    if compensate_delay:
+        x, y, _ = time_align(x, y, fs)
+
+    f, S_xy = csd(x, y, fs=fs, **csd_kwargs)
+    _, S_xx = welch(x, fs=fs, **csd_kwargs)
+    _, S_yy = welch(y, fs=fs, **csd_kwargs)
+
+    gamma2 = np.abs(S_xy)**2 / S_xx / S_yy
+
+    return f, gamma2
+
+
+def coherence(x, y, fs):
+    """Compute maginitude squared coherence of two signals.
+
+    Parameters
+    ----------
+    x, y : ndarray, float
+        Reference and measured signal in one dimensional arrays of same length.
+    fs : int
+        Sampling frequency
+
+    Returns
+    -------
+    f : ndarray
+        Array of sample frequencies.
+    H : ndarray
+        Magnitude squared coherence
+    """
+    assert x.ndim == 1
+    assert y.ndim == 1
+    assert x.size == y.size
+
+    n = len(x)
+
+    R_xy = np.correlate(x, y, mode="full")
+    R_xx = np.correlate(x, x, mode="full")
+    R_yy = np.correlate(y, y, mode="full")
+
+    S_xy = np.fft.rfft(R_xy[R_xy.size // 2:])
+    S_xx = np.fft.rfft(R_xy[R_xx.size // 2:])
+    S_yy = np.fft.rfft(R_xy[R_yy.size // 2:])
+
+    gamma2 = np.abs(S_xy)**2 / (S_xx * S_yy)
+
+    return frequency_vector(n, fs), gamma2
