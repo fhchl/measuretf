@@ -238,7 +238,7 @@ def transfer_function(ref, meas, ret_time=True, axis=-1, fwindow=None, fftwindow
         Y *= W
         Y = np.moveaxis(Y, -1, axis)
 
-    # R[R == 0] = np.median(R) * np.finfo(complex).eps  # avoid devision by zero
+    R[R == 0] = np.median(R) * np.finfo(complex).eps  # avoid devision by zero
     H = Y / R
 
     if ret_time:
@@ -322,17 +322,16 @@ def multi_transfer_function(recs, ref_ch=0, ret_time=True):
     """
     n_ch, n_ls, n_avg, n_tap = recs.shape
     if ret_time:
-        tfs = np.zeros((n_ch, n_ls, n_tap))
+        tfs = np.zeros((n_ch, n_ls, n_avg, n_tap))
     else:
-        tfs = np.zeros((n_ch, n_ls, n_tap // 2 + 1))
+        tfs = np.zeros((n_ch, n_ls, n_avg, n_tap // 2 + 1))
     for avg in range(n_avg):
         for ch in range(n_ch):
             for ls in range(n_ls):
-                tfs[ch, ls] += (
+                tfs[ch, ls, avg] = (
                     transfer_function(
                         recs[ref_ch, ls, avg], recs[ch, ls, avg], ret_time=ret_time
                     )
-                    / n_avg
                 )
     return tfs
 
@@ -482,7 +481,7 @@ def convert_TDRmat_recording_to_npz(fname, output_folder=None):
     np.savez(newpath, recs=recs, fs=fs, n_ch=n_ch, n_tap=n_tap)
 
 
-def folder_convert_TDRmat_recording_to_npz(path, output_folder=None):
+def folder_convert_TDRmat_recording_to_npz(path, output_folder=None, unlink=False):
     """Convert all .mat recording in folder into npz format.
 
     Parameters
@@ -496,6 +495,11 @@ def folder_convert_TDRmat_recording_to_npz(path, output_folder=None):
     folder : None or Path, optional
         Save in this folder, instead of same folder as fname (default)
     """
+    # delete content of outputfolder
+    if output_folder is not None:
+        for f in Path(output_folder).glob("*.npz"):
+            f.unlink()
+
     files = Path(path).glob("*.mat")
     for f in tqdm(list(files)):
         convert_TDRmat_recording_to_npz(f, output_folder=output_folder)
@@ -514,6 +518,7 @@ def transfer_functions_from_recordings(
     take_T=None,
     H_comp=None,
     T_comp=None,
+    average=True,
 ):
     """Calculate transfer-functions from a set of recordings inside a folder.
 
@@ -569,7 +574,12 @@ def transfer_functions_from_recordings(
     else:
         n_tap = int(n_tap / n_ls / n_avg)
 
-    H = np.zeros((n_meas, n_ch - 1, n_ls, n_tap // 2 + 1), dtype=complex)
+    if average:
+        shape_H = (n_meas, n_ch - 1, n_ls, n_tap // 2 + 1)
+    else:
+        shape_H = (n_meas, n_ch - 1, n_ls, n_avg, n_tap // 2 + 1)
+
+    H = np.zeros(shape_H, dtype=complex)
 
     for i in tqdm(np.arange(n_meas)):
         fname = fpath / fformat.format(i + 1)
@@ -585,26 +595,30 @@ def transfer_functions_from_recordings(
         # compute transfer-function in time domain
         temp = multi_transfer_function(temp, ref_ch=ref_ch, ret_time=True)
 
+        if average:
+            temp = temp.mean(axis=-2, keepdims=False)
+
         # exclude reference channel
         temp = temp[1:]
 
         if H_comp is not None:
             # time crop to same length as compensation filter
             n_comp = int(T_comp * fs)
-            temp = temp[:, :, :n_comp]
+            temp = temp[..., :n_comp]
             Temp = np.fft.rfft(temp)
             # apply compensation filter
-            Temp *= H_comp[:, None, :]
+            Temp *= H_comp[:, None, :]  # FIXME: works if average is False?
             temp = np.fft.irfft(Temp, n=n_comp)
+            del Temp
 
         if take_T is not None:
             # only take first take_T seconds
-            temp = temp[:, :, :n_tap]
+            temp = temp[..., :n_tap]
             if twindow is None:
                 # time window the tail
                 nwin = int(round(take_T * 0.05 * fs))
                 w = hann(2 * nwin)[nwin:]
-                temp[:, :, -nwin:] *= w
+                temp[..., -nwin:] *= w
 
         if lowpass_lim is not None:
             # filter out HF noise with zero phase frequency domain window
