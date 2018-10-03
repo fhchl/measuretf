@@ -321,10 +321,12 @@ def multi_transfer_function(recs, ref_ch=0, ret_time=True):
         domain.
     """
     n_ch, n_ls, n_avg, n_tap = recs.shape
+
     if ret_time:
         tfs = np.zeros((n_ch, n_ls, n_avg, n_tap))
     else:
         tfs = np.zeros((n_ch, n_ls, n_avg, n_tap // 2 + 1))
+
     for avg in range(n_avg):
         for ch in range(n_ch):
             for ls in range(n_ls):
@@ -333,6 +335,7 @@ def multi_transfer_function(recs, ref_ch=0, ret_time=True):
                         recs[ref_ch, ls, avg], recs[ch, ls, avg], ret_time=ret_time
                     )
                 )
+
     return tfs
 
 
@@ -428,7 +431,7 @@ def load_npz_recording(fname, n_ls=1, n_avg=1, fullout=False):
         fs = data["fs"]
         n_otap = data["n_tap"]
         n_ch = data["n_ch"]
-        orecs = data["recs"]
+        orecs = data["recs"]  # has shape n_ch x n_taps
 
     n_tap = n_otap / n_ls / n_avg
     if n_tap.is_integer():
@@ -438,9 +441,11 @@ def load_npz_recording(fname, n_ls=1, n_avg=1, fullout=False):
 
     recs = np.zeros((n_ch, n_ls, n_avg, n_tap))
     for i in range(n_ch):
-        # shape (N*n_avg*n_ls, ) -> (n_avg, N*n_ls)
-        temp = np.array(np.split(orecs[i], n_avg))
-        recs[i] = np.array(np.split(temp, n_ls, axis=1))  # (n_ls, n_avg, N)
+        # shape  (ntaps*n_avg*n_ls, ) -> (n_ls, ntaps*n_avg)
+        temp = np.array(np.split(orecs[i], n_ls))
+        temp = np.array(np.split(temp, n_avg, axis=-1)) # (n_avg, n_ls, n_taps)
+        temp = np.moveaxis(temp, 0, 1)  # (n_ls, n_avg, n_taps)
+        recs[i] = temp
 
     if fullout:
         return recs, fs, n_ch, n_tap
@@ -592,7 +597,6 @@ def transfer_functions_from_recordings(
         else:
             raise ValueError()
 
-        # compute transfer-function in time domain
         temp = multi_transfer_function(temp, ref_ch=ref_ch, ret_time=True)
 
         if average:
