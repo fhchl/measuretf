@@ -238,7 +238,8 @@ def transfer_function(ref, meas, ret_time=True, axis=-1, fwindow=None, fftwindow
         Y *= W
         Y = np.moveaxis(Y, -1, axis)
 
-    R[R == 0] = np.median(R) * np.finfo(complex).eps  # avoid devision by zero
+    R[R == 0] = np.finfo(complex).eps  # avoid devision by zero
+
     H = Y / R
 
     if ret_time:
