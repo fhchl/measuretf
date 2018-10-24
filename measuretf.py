@@ -437,7 +437,7 @@ def load_npz_recording(fname, n_ls=1, n_avg=1, fullout=False):
     if n_tap.is_integer():
         n_tap = int(n_tap)
     else:
-        raise ValueError()
+        raise ValueError("n_tap is not an integer")
 
     recs = np.zeros((n_ch, n_ls, n_avg, n_tap))
     for i in range(n_ch):
