@@ -27,14 +27,14 @@ from scipy.io import loadmat, wavfile
 def is_ipynb():
     try:
         shell = get_ipython().__class__.__name__
-        if shell == 'ZMQInteractiveShell':
-            return True   # Jupyter notebook or qtconsole
-        elif shell == 'TerminalInteractiveShell':
+        if shell == "ZMQInteractiveShell":
+            return True  # Jupyter notebook or qtconsole
+        elif shell == "TerminalInteractiveShell":
             return False  # Terminal running IPython
         else:
             return False  # Other type (?)
     except NameError:
-        return False      # Probably standard Python interpreter
+        return False  # Probably standard Python interpreter
 
 
 if is_ipynb():
@@ -641,7 +641,6 @@ def transfer_functions_from_recordings(
     twindow=None,
     take_T=None,
     H_comp=None,
-    T_comp=None,
 ):
     """Calculate transfer-functions from a set of recordings inside a folder.
 
@@ -655,8 +654,6 @@ def transfer_functions_from_recordings(
         Total number of recordings
     H_comp : None or ndarray, shape (n_ch - 1, nf), optional
         If present, apply a compensation filter to each single recording.
-    T_comp : None or float
-        Length of H_comp in time domain in seconds.
     fformat : str, optional
         Recording file naming. Must include one '{}' to enumerate.
     n_avg : int, optional
@@ -691,6 +688,10 @@ def transfer_functions_from_recordings(
     shape_H = (n_meas, n_ch - 1, n_ls, n_avg, n_tap // 2 + 1)
     H = np.zeros(shape_H, dtype=complex)
 
+    if H_comp is not None:
+        # cut H to same length in time domain
+        H_comp = Response.from_freq(int(fs), H_comp).ncshrink(n_tap * 1 / fs).in_freq
+
     for i in tqdm(np.arange(n_meas)):
         fname = fpath / fformat.format(i + 1)
 
@@ -707,16 +708,6 @@ def transfer_functions_from_recordings(
         # exclude reference channel
         temp = np.delete(temp, 0, axis=0)
 
-        if H_comp is not None:
-            # time crop to same length as compensation filter
-            n_comp = int(T_comp * fs)
-            temp = temp[..., :n_comp]
-            Temp = np.fft.rfft(temp)
-            # apply compensation filter
-            Temp *= H_comp[:, None, :]  # FIXME: works if average is False?
-            temp = np.fft.irfft(Temp, n=n_comp)
-            del Temp
-
         if take_T is not None:
             # only take first take_T seconds
             temp = temp[..., :n_tap]
@@ -725,6 +716,12 @@ def transfer_functions_from_recordings(
                 nwin = int(round(take_T * 0.05 * fs))
                 w = hann(2 * nwin)[nwin:]
                 temp[..., -nwin:] *= w
+
+        if H_comp is not None:
+            # convolve with compensation filter
+            Temp = np.fft.rfft(temp) * H_comp[:, None, None, :]
+            temp = np.fft.irfft(Temp, n=n_tap)
+            del Temp
 
         if lowpass_lim is not None:
             # filter out HF noise with zero phase frequency domain window
