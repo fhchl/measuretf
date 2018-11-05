@@ -8,7 +8,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sounddevice as sd
 from response import Response
-from tqdm import tqdm
 from scipy.signal import (
     hann,
     butter,
@@ -24,6 +23,24 @@ from scipy.signal import (
 )
 from scipy.io import loadmat, wavfile
 
+
+def is_ipynb():
+    try:
+        shell = get_ipython().__class__.__name__
+        if shell == 'ZMQInteractiveShell':
+            return True   # Jupyter notebook or qtconsole
+        elif shell == 'TerminalInteractiveShell':
+            return False  # Terminal running IPython
+        else:
+            return False  # Other type (?)
+    except NameError:
+        return False      # Probably standard Python interpreter
+
+
+if is_ipynb():
+    from tqdm import tqdm_notebook as tqdm
+else:
+    from tqdm import tqdm
 
 # EXITATION SIGNALS
 
@@ -519,6 +536,42 @@ def load_npz_recording(fname, n_ls=1, n_avg=1, fullout=False):
     return recs, fs
 
 
+def load_recording(fname, n_ls=1, n_avg=1, fullout=False):
+    """Load multichannel Time Data Recording into ndarray.
+
+    Parameters
+    ----------
+    fname : str
+        Name of the mat or npz file. Can also pass open file-like object. Reference
+        channel is assumed to be recorded in first channel.
+    n_ls : int, optional
+        Number of simultaneously, in series recorded output channels.
+    n_avg : int, optional
+        Number of recorded averages.
+
+    Returns
+    -------
+    recs : ndarray, shape (n_ch, n_ls, n_avg, n_tap)
+        Recordings, sliced into averages and output channels.
+    fs : int
+        Sampling frequency.
+    """
+    fname = Path(fname)
+    if fname.suffix == ".mat":
+        recs, fs, n_tap, n_ch = load_mat_recording(
+            fname, n_ls=n_ls, n_avg=n_avg, fullout=True
+        )
+    elif fname.suffix == ".npz":
+        recs, fs, n_tap, n_ch = load_npz_recording(
+            fname, n_ls=n_ls, n_avg=n_avg, fullout=True
+        )
+
+    if fullout:
+        return recs, fs, n_ch, n_tap
+
+    return recs, fs
+
+
 def convert_TDRmat_recording_to_npz(fname, output_folder=None):
     """Convert .mat recording from Time Data recorder into npz format.
 
@@ -626,17 +679,8 @@ def transfer_functions_from_recordings(
     fpath = Path(fp)
 
     # read meta data from first recording
-    # TODO: use load_recording funcs here
     fname = fpath / fformat.format(1)
-    if fname.suffix == ".mat":
-        fs, n_tap, n_ch = header_info(fname)
-    elif fname.suffix == ".npz":
-        with np.load(fname) as data:
-            fs = data["fs"]
-            n_tap = data["n_tap"]
-            n_ch = data["n_ch"]
-    else:
-        raise ValueError("Neither mat nor npz file.")
+    _, fs, n_tap, n_ch = load_recording(fname, n_ls=n_ls, n_avg=n_avg, fullout=True)
 
     if take_T is not None:
         # only take first take_T seconds of impulse responses
