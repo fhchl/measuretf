@@ -1,10 +1,14 @@
 """Collection of functions for transfer-function measurements."""
 
+import warnings
+from datetime import datetime
+from pathlib import Path
+
 import numpy as np
 import matplotlib.pyplot as plt
 import sounddevice as sd
-from datetime import datetime
-from pathlib import Path
+from response import Response
+from tqdm import tqdm
 from scipy.signal import (
     hann,
     butter,
@@ -19,11 +23,10 @@ from scipy.signal import (
     correlate,
 )
 from scipy.io import loadmat, wavfile
-from tqdm import tqdm
-from response import Response
 
 
 # EXITATION SIGNALS
+
 
 def exponential_sweep(
     T, fs, tfade=0.05, f_start=None, f_end=None, maxamp=0.95, post_silence=0
@@ -196,7 +199,8 @@ def multichannel_serial_sound(sound, n_ch, reference=False):
 
 # ESTIMATE TRANSFER FUNCTIONS
 
-def transfer_function(ref, meas, ret_time=True, axis=-1, fwindow=None, fftwindow=None):
+
+def transfer_function(ref, meas, ret_time=True, axis=-1, Ywindow=None, fftwindow=None):
     """Compute transfer-function between time domain signals.
 
     Parameters
@@ -205,40 +209,53 @@ def transfer_function(ref, meas, ret_time=True, axis=-1, fwindow=None, fftwindow
         Reference signal.
     meas : ndarray, float
         Measured signal.
+    ret_time : bool, optional
+        If True, return in time domain. Otherwise return in frequency domain.
+    axis : integer, optional
+        Time axis
+    Ywindow : Tuple or None, optional
+        Apply a frequency domain window to `meas`. (fs, startwindow, stopwindow) before
+        the FFT to avoid numerical problems close to Nyquist frequency due to division
+        by small numbers.
+    fftwindow : None, optional
+        Apply a Tukey time window to meas before doing the fft removing clicks at the
+        end and beginning of the recording.
 
     Returns
     -------
-    h: ndarray, float
+    h : ndarray, float
         Transfer-function between ref and
         meas.
     """
+    # NOTE: is this used anywhere? If not remove
     if fftwindow:
         print("fftwindowing!")
         w = tukey(ref.shape[axis], alpha=0.1)
-        #ref = np.moveaxis(ref, axis, -1)
         meas = np.moveaxis(meas, axis, -1)
-        #ref = ref * w
         meas = meas * w
-        #ref = np.moveaxis(ref, -1, axis)
         meas = np.moveaxis(meas, -1, axis)
-
-#    plt.figure()
-#    plt.plot(ref)
-#    plt.figure()
-#    plt.plot(meas)
-#    plt.show()
 
     R = np.fft.rfft(ref, axis=axis)  # no need for normalization because
     Y = np.fft.rfft(meas, axis=axis)  # of division
 
-    if fwindow is not None:
-        fs, startwindow, stopwindow = fwindow
+    # Window the measurement before deconvolution, avoiding insane TF amplitudes near
+    # the Nyquist frequency due to division by small numbers
+    if Ywindow is not None:
+        fs, startwindow, stopwindow = Ywindow
         W = freq_window(fs, ref.shape[axis], startwindow, stopwindow)
         Y = np.moveaxis(Y, axis, -1)
         Y *= W
         Y = np.moveaxis(Y, -1, axis)
 
+    # FIXME: next two paragraphs are not very elegant
     R[R == 0] = np.finfo(complex).eps  # avoid devision by zero
+
+    # Avoid large TF gains that lead to Fourier Transform numerical errors
+    TOO_LARGE_GAIN = 180
+    too_large = 20 * np.log10(np.abs(Y / R)) > TOO_LARGE_GAIN
+    if np.any(too_large):
+        warnings.warn(f"Some TF gains larger than {TOO_LARGE_GAIN} dB. Setting to 0")
+        Y[too_large] = 0
 
     H = Y / R
 
@@ -249,9 +266,89 @@ def transfer_function(ref, meas, ret_time=True, axis=-1, fwindow=None, fftwindow
         return H
 
 
-def transfer_function_csd(
-    x, y, fs, compensate_delay=True, fwindow=None, **kwargs
-):
+def multi_transfer_function(recs, ref_ch=0, ret_time=True):
+    """Transfer-function between multichannel recording and reference channels.
+
+    Parameters
+    ----------
+    recs : ndarray, shape (n_ch, n_ls, n_avg, n_tap)
+        Multichannel recording.
+    ref_ch : int
+        Index of reference channel in recs.
+
+    Returns
+    -------
+    ndarray, shape (n_ch, n_ls, n_tap)
+        Transfer function between reference and measured signals in time
+        domain.
+    """
+    n_ch, n_ls, n_avg, n_tap = recs.shape
+
+    if ret_time:
+        tfs = np.zeros((n_ch, n_ls, n_avg, n_tap))
+    else:
+        tfs = np.zeros((n_ch, n_ls, n_avg, n_tap // 2 + 1))
+
+    for avg in range(n_avg):
+        for ch in range(n_ch):
+            for ls in range(n_ls):
+                tfs[ch, ls, avg] = transfer_function(
+                    recs[ref_ch, ls, avg], recs[ch, ls, avg], ret_time=ret_time
+                )
+
+    return tfs
+
+
+def transfer_function_with_reference(recs, Ywindow=None, ref=0, fftwindow=None):
+    """Transfer-function between multichannel recording and reference channels.
+
+    Parameters
+    ----------
+    recs : ndarray, shape (no, ni, nt)
+        Multichannel recording.
+    ref : int or or list of ints or ndarray
+        Index of reference channel in recs or the digital reference signal of shape
+        (no, nt)
+
+    Returns
+    -------
+    ndarray, shape (no, ni, nt)
+        Transfer function between reference and measured signals in time
+        domain.
+    """
+    no, ni, nt = recs.shape
+    tfs = np.zeros((no, ni, nt))
+    for o in range(no):
+        for i in range(ni):
+            if isinstance(ref, int):
+                # ref is reference channel
+                r = recs[o, ref]
+            elif isinstance(ref, list):
+                r = recs[o, ref[o]]
+            else:
+                # ref is reference sound
+                r = ref
+
+            tfs[o, i] = transfer_function(
+                r, recs[o, i], ret_time=True, Ywindow=Ywindow, fftwindow=fftwindow
+            )
+            """
+            print("fwindow", fwindow)
+            print("fftwindow", fftwindow)
+            print(o, i)
+            plt.figure()
+            plt.plot(r)
+            plt.figure()
+            plt.plot(recs[o, i])
+            plt.figure()
+            plt.plot(tfs[o, i])
+            raise Exception
+            """
+
+    return tfs
+
+
+def transfer_function_csd(x, y, fs, compensate_delay=True, fwindow=None, **kwargs):
     """Compute transfer-function between time domain signals using Welch's method.
 
     Delay compensation mentioned e.g. in S. Muller, A. E. S. Member, and P. Massarani,
@@ -305,42 +402,8 @@ def transfer_function_csd(
     return f, H
 
 
-def multi_transfer_function(recs, ref_ch=0, ret_time=True):
-    """Transfer-function between multichannel recording and reference channels.
-
-    Parameters
-    ----------
-    recs : ndarray, shape (n_ch, n_ls, n_avg, n_tap)
-        Multichannel recording.
-    ref_ch : int
-        Index of reference channel in recs.
-
-    Returns
-    -------
-    ndarray, shape (n_ch, n_ls, n_tap)
-        Transfer function between reference and measured signals in time
-        domain.
-    """
-    n_ch, n_ls, n_avg, n_tap = recs.shape
-
-    if ret_time:
-        tfs = np.zeros((n_ch, n_ls, n_avg, n_tap))
-    else:
-        tfs = np.zeros((n_ch, n_ls, n_avg, n_tap // 2 + 1))
-
-    for avg in range(n_avg):
-        for ch in range(n_ch):
-            for ls in range(n_ls):
-                tfs[ch, ls, avg] = (
-                    transfer_function(
-                        recs[ref_ch, ls, avg], recs[ch, ls, avg], ret_time=ret_time
-                    )
-                )
-
-    return tfs
-
-
 # B&K TIME DATA RECORDER PROCESSING
+
 
 def header_info(fname):
     """Header information of MAT-file exported by Time Data Recorder.
@@ -444,7 +507,7 @@ def load_npz_recording(fname, n_ls=1, n_avg=1, fullout=False):
     for i in range(n_ch):
         # shape  (ntaps*n_avg*n_ls, ) -> (n_ls, ntaps*n_avg)
         temp = np.array(np.split(orecs[i], n_ls))
-        temp = np.array(np.split(temp, n_avg, axis=-1)) # (n_avg, n_ls, n_taps)
+        temp = np.array(np.split(temp, n_avg, axis=-1))  # (n_avg, n_ls, n_taps)
         temp = np.moveaxis(temp, 0, 1)  # (n_ls, n_avg, n_taps)
         recs[i] = temp
 
@@ -556,8 +619,10 @@ def transfer_functions_from_recordings(
 
     Returns
     -------
-    ndarray, shape (n_meas, n_ch - 1, n_ls, n_tap // 2 + 1)
-        Transfer-functions. Possibly lowpass filtered
+    ndarray,
+        Transfer-functions
+        if average: shape (n_meas, n_ch - 1, n_ls, n_tap // 2 + 1)
+        if not average: shape (n_meas, n_ch - 1, n_ls, n_avg, n_tap // 2 + 1)
     """
     fpath = Path(fp)
 
@@ -600,11 +665,11 @@ def transfer_functions_from_recordings(
 
         temp = multi_transfer_function(temp, ref_ch=ref_ch, ret_time=True)
 
+        # exclude reference channel
+        temp = np.delete(temp, 0, axis=0)
+
         if average:
             temp = temp.mean(axis=-2, keepdims=False)
-
-        # exclude reference channel
-        temp = temp[1:]
 
         if H_comp is not None:
             # time crop to same length as compensation filter
@@ -665,6 +730,7 @@ def cut_recording(fname, cuts, names=None, remove_orig=False, outfolder=None):
 
 
 # TF MEASUREMENT
+
 
 def measure_single_output_impulse_response(
     sound,
@@ -837,6 +903,7 @@ def measure_multi_output_impulse_respone(
 
 # RECORD EXCITATIONS
 
+
 def record_single_output_excitation(sound, fs, out_ch=1, in_ch=1, **sd_kwargs):
     """Meassure impulse response between single output and multiple inputs.
 
@@ -958,7 +1025,7 @@ def saverec_multi_output_excitation(
     )
 
     if add_datetime_to_name:
-        datetime_str = datetime.now().isoformat(' ', 'seconds').replace(':', '-')
+        datetime_str = datetime.now().isoformat(" ", "seconds").replace(":", "-")
         fn = filename + " - " + datetime_str
     else:
         fn = filename
@@ -994,7 +1061,7 @@ def saverec_recording(
     )
 
     if add_datetime_to_name:
-        datetime_str = datetime.now().isoformat(timespec='seconds').replace(':', '-')
+        datetime_str = datetime.now().isoformat(timespec="seconds").replace(":", "-")
         fn = filename + " - " + datetime_str
     else:
         fn = filename
@@ -1014,6 +1081,7 @@ def saverec_recording(
 
 
 # FOR KFF18
+
 
 def plot_rec(fs, recs, **plot_kwargs):
     """Plot a recording."""
@@ -1100,53 +1168,6 @@ def convert_wav_to_rec(
     return recs, fs
 
 
-def transfer_function_with_reference(recs, fwindow=None, ref=0, fftwindow=None):
-    """Transfer-function between multichannel recording and reference channels.
-
-    Parameters
-    ----------
-    recs : ndarray, shape (no, ni, nt)
-        Multichannel recording.
-    ref : int or or list of ints or ndarray
-        Index of reference channel in recs or the digital reference signal of shape
-        (no, nt)
-
-    Returns
-    -------
-    ndarray, shape (no, ni, nt)
-        Transfer function between reference and measured signals in time
-        domain.
-    """
-    no, ni, nt = recs.shape
-    tfs = np.zeros((no, ni, nt))
-    for o in range(no):
-        for i in range(ni):
-            if isinstance(ref, int):
-                # ref is reference channel
-                r = recs[o, ref]
-            elif isinstance(ref, list):
-                r = recs[o, ref[o]]
-            else:
-                # ref is reference sound
-                r = ref
-
-            tfs[o, i] = transfer_function(r, recs[o, i], ret_time=True, fwindow=fwindow, fftwindow=fftwindow)
-            """
-            print("fwindow", fwindow)
-            print("fftwindow", fftwindow)
-            print(o, i)
-            plt.figure()
-            plt.plot(r)
-            plt.figure()
-            plt.plot(recs[o, i])
-            plt.figure()
-            plt.plot(tfs[o, i])
-            raise Exception
-            """
-
-    return tfs
-
-
 def tf_and_post_from_saved_rec(
     fname,
     tcut=None,
@@ -1183,7 +1204,9 @@ def tf_and_post_from_saved_rec(
             # NOTE: no calibration!
             ref = sound
 
-    irs = transfer_function_with_reference(recs, ref=ref, fwindow=fwindow, fftwindow=fftwindow)
+    irs = transfer_function_with_reference(
+        recs, ref=ref, fwindow=fwindow, fftwindow=fftwindow
+    )
 
     if plot:
         Response.from_time(fs, irs).plot(figsize=(10, 10))
@@ -1287,7 +1310,7 @@ def tf_and_post_from_saved_rec_csd(
                 )
                 irs[o, i] = np.fft.irfft(H)
             elif mode == "naive":
-                irs[o, i] = transfer_function(x, y, fwindow=(fs, *fwindow))
+                irs[o, i] = transfer_function(x, y, Ywindow=(fs, *fwindow))
             else:
                 raise ValueError
 
@@ -1554,6 +1577,7 @@ def thd(r, fs, order=10):
 
 # FILTERING
 
+
 def lowpass_by_frequency_domain_window(fs, x, fstart, fstop, axis=-1):
     """Summary
 
@@ -1700,6 +1724,7 @@ def mutliconvolve(sound, h, plot=False):
 
 
 # FFT FUNCS
+
 
 def frequency_vector(n, fs, sided="single"):
     """Frequency values of filter with n taps sampled at fs up to Nyquist.
@@ -1861,6 +1886,7 @@ def inverse_amplitude_spectrum(X, isEvenSampled=True, axis=-1, norm=True):
 
 # UTILS
 
+
 def find_nearest(array, value):
     """Find nearest value in an array and its index."""
     idx = (np.abs(array - value)).argmin()
@@ -1945,7 +1971,7 @@ def coherence_csd(x, y, fs, compensate_delay=True, **csd_kwargs):
     _, S_xx = welch(x, fs=fs, **csd_kwargs)
     _, S_yy = welch(y, fs=fs, **csd_kwargs)
 
-    gamma2 = np.abs(S_xy)**2 / S_xx / S_yy
+    gamma2 = np.abs(S_xy) ** 2 / S_xx / S_yy
 
     return f, gamma2
 
@@ -1977,10 +2003,10 @@ def coherence(x, y, fs):
     R_xx = np.correlate(x, x, mode="full")
     R_yy = np.correlate(y, y, mode="full")
 
-    S_xy = np.fft.rfft(R_xy[R_xy.size // 2:])
-    S_xx = np.fft.rfft(R_xy[R_xx.size // 2:])
-    S_yy = np.fft.rfft(R_xy[R_yy.size // 2:])
+    S_xy = np.fft.rfft(R_xy[R_xy.size // 2 :])
+    S_xx = np.fft.rfft(R_xy[R_xx.size // 2 :])
+    S_yy = np.fft.rfft(R_xy[R_yy.size // 2 :])
 
-    gamma2 = np.abs(S_xy)**2 / (S_xx * S_yy)
+    gamma2 = np.abs(S_xy) ** 2 / (S_xx * S_yy)
 
     return frequency_vector(n, fs), gamma2
