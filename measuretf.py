@@ -251,10 +251,12 @@ def transfer_function(ref, meas, ret_time=True, axis=-1, Ywindow=None, fftwindow
     R[R == 0] = np.finfo(complex).eps  # avoid devision by zero
 
     # Avoid large TF gains that lead to Fourier Transform numerical errors
-    TOO_LARGE_GAIN = 180
-    too_large = 20 * np.log10(np.abs(Y / R)) > TOO_LARGE_GAIN
+    TOO_LARGE_GAIN = 1e9
+    too_large = np.abs(Y / R) > TOO_LARGE_GAIN
     if np.any(too_large):
-        warnings.warn(f"Some TF gains larger than {TOO_LARGE_GAIN} dB. Setting to 0")
+        warnings.warn(
+            f"Some TF gains larger than {20*np.log10(TOO_LARGE_GAIN):.0f} dB. Setting to 0"
+        )
         Y[too_large] = 0
 
     H = Y / R
@@ -587,7 +589,6 @@ def transfer_functions_from_recordings(
     take_T=None,
     H_comp=None,
     T_comp=None,
-    average=True,
 ):
     """Calculate transfer-functions from a set of recordings inside a folder.
 
@@ -620,9 +621,7 @@ def transfer_functions_from_recordings(
     Returns
     -------
     ndarray,
-        Transfer-functions
-        if average: shape (n_meas, n_ch - 1, n_ls, n_tap // 2 + 1)
-        if not average: shape (n_meas, n_ch - 1, n_ls, n_avg, n_tap // 2 + 1)
+        Transfer-functions, shape (n_meas, n_ch - 1, n_ls, n_avg, n_tap // 2 + 1)
     """
     fpath = Path(fp)
 
@@ -645,11 +644,7 @@ def transfer_functions_from_recordings(
     else:
         n_tap = int(n_tap / n_ls / n_avg)
 
-    if average:
-        shape_H = (n_meas, n_ch - 1, n_ls, n_tap // 2 + 1)
-    else:
-        shape_H = (n_meas, n_ch - 1, n_ls, n_avg, n_tap // 2 + 1)
-
+    shape_H = (n_meas, n_ch - 1, n_ls, n_avg, n_tap // 2 + 1)
     H = np.zeros(shape_H, dtype=complex)
 
     for i in tqdm(np.arange(n_meas)):
@@ -667,9 +662,6 @@ def transfer_functions_from_recordings(
 
         # exclude reference channel
         temp = np.delete(temp, 0, axis=0)
-
-        if average:
-            temp = temp.mean(axis=-2, keepdims=False)
 
         if H_comp is not None:
             # time crop to same length as compensation filter
