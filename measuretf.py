@@ -558,11 +558,11 @@ def load_recording(fname, n_ls=1, n_avg=1, fullout=False):
     """
     fname = Path(fname)
     if fname.suffix == ".mat":
-        recs, fs, n_tap, n_ch = load_mat_recording(
+        recs, fs, n_ch, n_tap = load_mat_recording(
             fname, n_ls=n_ls, n_avg=n_avg, fullout=True
         )
     elif fname.suffix == ".npz":
-        recs, fs, n_tap, n_ch = load_npz_recording(
+        recs, fs, n_ch, n_tap = load_npz_recording(
             fname, n_ls=n_ls, n_avg=n_avg, fullout=True
         )
 
@@ -677,7 +677,7 @@ def transfer_functions_from_recordings(
 
     # read meta data from first recording
     fname = fpath / fformat.format(1)
-    _, fs, n_tap, n_ch = load_recording(fname, n_ls=n_ls, n_avg=n_avg, fullout=True)
+    _, fs, n_ch, n_tap = load_recording(fname, n_ls=n_ls, n_avg=n_avg, fullout=True)
 
     if take_T is not None:
         # only take first take_T seconds of impulse responses
