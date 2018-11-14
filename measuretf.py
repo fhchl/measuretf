@@ -43,10 +43,12 @@ else:
     from tqdm import tqdm
 
 # EXITATION SIGNALS
+# TODO: Collection Signals in a class Signal with common features like post_silence,
+#       fades, f_start and end, maxamp ...
 
 
 def exponential_sweep(
-    T, fs, tfade=0.05, f_start=None, f_end=None, maxamp=0.95, post_silence=0
+    T, fs, tfade=0.05, f_start=None, f_end=None, maxamp=1, post_silence=0
 ):
     """Generate exponential sweep.
 
@@ -89,7 +91,7 @@ def exponential_sweep(
     w_end = 2 * np.pi * f_end
 
     # constuct sweep
-    t = np.linspace(0, T, n_tap)
+    t = np.linspace(0, T, n_tap, endpoint=False)
     sweep = np.sin(
         w_start
         * T
@@ -110,6 +112,63 @@ def exponential_sweep(
         sweep = np.concatenate((sweep, silence))
 
     return sweep
+
+
+def synchronized_swept_sine(
+    Tapprox, fs, f_start=20, f_end=20e3, maxamp=1, tfade=0, post_silence=0
+):
+    """Generate synchronized swept sine.
+
+    Sweep constructed in time domain as described by `Novak`_.
+
+    Parameters
+    ----------
+    T : float
+        length of sweep
+    fs : int
+        sampling frequency
+    f_start, f_end: int, optional
+        starting end ending frequencies
+    tfade : float, optional
+        Fade in and out time with Hann window.
+    post_silence : float, optional
+        Added zeros in seconds.
+
+    Returns
+    -------
+    ndarray, floats
+        The sweep. It will have a length approximately to Tapprox. If end frequency is
+        integer multiple of start frequency the sweep will start and end with a 0.
+
+    .. _Novak:
+       A. Novak, P. Lotton, and L. Simon, “Transfer-Function Measurement with Sweeps *,”
+       Journal of the Audio Engineering Society, vol. 63, no. 10, pp. 786–798, 2015.
+    """
+    assert f_start < f_end
+    assert f_end <= fs / 2
+
+    k = round(Tapprox * f_start / np.log(f_end / f_start))
+    if k == 0:
+        raise ValueError("Choose arguments s. t. f1 / log(f_2 / f_1) * T >= 0.5")
+    L = k / f_start
+    T = L * np.log(f_end / f_start)
+    n = np.ceil(fs * T)
+    t = np.linspace(0, T, n, endpoint=False)
+    x = np.sin(2 * np.pi * f_start * L * np.exp(t / L))
+    x *= maxamp
+
+    if tfade:
+        # TODO: just use a tukey window here
+        n_fade = round(tfade * fs)
+        fading_window = hann(2 * n_fade)
+        x[:n_fade] = x[:n_fade] * fading_window[:n_fade]
+        x[-n_fade:] = x[-n_fade:] * fading_window[-n_fade:]
+
+    if post_silence > 0:
+        silence = np.zeros(int(round(post_silence * fs)))
+        x = np.concatenate((x, silence))
+
+    return x
 
 
 def mls(order, fs, highpass=10, fade_alpha=0.1, pink=True):
@@ -134,7 +193,9 @@ def mls(order, fs, highpass=10, fade_alpha=0.1, pink=True):
     return mls
 
 
-def pink_noise(T, fs, tfade=0.1, flim=(5, 20e3)):
+def pink_noise(
+    T, fs, tfade=0.1, flim=(5, 20e3), fknee=30, post_silence=0, noise="randphase"
+):
     """Generate pink noise.
 
     Parameters
@@ -156,24 +217,41 @@ def pink_noise(T, fs, tfade=0.1, flim=(5, 20e3)):
     """
     N = int(np.round(T * fs))
     Nf = N // 2 + 1
-    f = np.linspace(0, fs / 2, Nf)
+    f = np.linspace(0, fs / 2, Nf, endpoint=False)
     flim = np.asarray(flim)
 
-    rand_phase = 2 * np.pi * np.random.random(Nf)
-    X = np.ones(Nf) * np.exp(1j * rand_phase)
-    X[1:] = X[1:] / f[1:]
+    if noise == "MLS":
+        order = int(np.ceil(np.log2(N)))
+        x = 2 * (max_len_seq(order)[0].astype(float) - 0.5)
+        x = x[:N]
+        X = np.fft.rfft(x)
+    else:  # noise == "randphase"
+        rand_phase = 2 * np.pi * np.random.random(Nf)
+        X = np.ones(Nf) * np.exp(1j * rand_phase)
 
-    x = np.fft.irfft(X)
+    # constant emphesis below fknee, pink above fknee
+    _, ifknee = find_nearest(f, fknee)
+    pink_weight = np.ones(f.shape)
+    pink_weight[1:] /= f[1:]
+    pink_weight[:ifknee] = pink_weight[ifknee]
+    X *= pink_weight
+
+    x = np.fft.irfft(X, n=N)
 
     # bandpass
     b, a = butter(4, flim / (fs / 2), "bandpass")
     x = lfilter(b, a, x)
 
-    # fade beginning and end
-    n_fade = round(tfade * fs)
-    fading_window = hann(2 * n_fade)
-    x[:n_fade] = x[:n_fade] * fading_window[:n_fade]
-    x[-n_fade:] = x[-n_fade:] * fading_window[-n_fade:]
+    if tfade:
+        # TODO: just use a tukey window here
+        n_fade = round(tfade * fs)
+        fading_window = hann(2 * n_fade)
+        x[:n_fade] = x[:n_fade] * fading_window[:n_fade]
+        x[-n_fade:] = x[-n_fade:] * fading_window[-n_fade:]
+
+    if post_silence > 0:
+        silence = np.zeros(int(round(post_silence * fs)))
+        x = np.concatenate((x, silence))
 
     x /= np.abs(x).max()
 
@@ -297,7 +375,7 @@ def multi_transfer_function(recs, ref_ch=0, ret_time=True):
 
     Returns
     -------
-    ndarray, shape (n_ch, n_ls, n_tap)
+    ndarray, shape (n_ch, n_ls, n_avg, n_tap)
         Transfer function between reference and measured signals in time
         domain.
     """
@@ -323,7 +401,7 @@ def transfer_function_with_reference(recs, Ywindow=None, ref=0, fftwindow=None):
 
     Parameters
     ----------
-    recs : ndarray, shape (no, ni, nt)
+    recs : ndarray, shape (no, ni, navg, nt)
         Multichannel recording.
     ref : int or or list of ints or ndarray
         Index of reference channel in recs or the digital reference signal of shape
@@ -331,38 +409,33 @@ def transfer_function_with_reference(recs, Ywindow=None, ref=0, fftwindow=None):
 
     Returns
     -------
-    ndarray, shape (no, ni, nt)
+    ndarray, shape (no, ni, navg, nt)
         Transfer function between reference and measured signals in time
         domain.
     """
-    no, ni, nt = recs.shape
-    tfs = np.zeros((no, ni, nt))
+    # TODO: make this work with multiple averages
+    no, ni, navg, nt = recs.shape
+    tfs = np.zeros((no, ni, navg, nt))
     for o in range(no):
         for i in range(ni):
-            if isinstance(ref, int):
-                # ref is reference channel
-                r = recs[o, ref]
-            elif isinstance(ref, list):
-                r = recs[o, ref[o]]
-            else:
-                # ref is reference sound
-                r = ref
+            for avg in range(navg):
+                if isinstance(ref, int):
+                    # ref is reference channel
+                    r = recs[o, ref, avg]
+                elif isinstance(ref, list):
+                    # ref is a list of reference signal channel
+                    r = recs[o, ref[o], avg]
+                else:
+                    # ref is reference sound
+                    r = ref
 
-            tfs[o, i] = transfer_function(
-                r, recs[o, i], ret_time=True, Ywindow=Ywindow, fftwindow=fftwindow
-            )
-            """
-            print("fwindow", fwindow)
-            print("fftwindow", fftwindow)
-            print(o, i)
-            plt.figure()
-            plt.plot(r)
-            plt.figure()
-            plt.plot(recs[o, i])
-            plt.figure()
-            plt.plot(tfs[o, i])
-            raise Exception
-            """
+                tfs[o, i] = transfer_function(
+                    r,
+                    recs[o, i, avg],
+                    ret_time=True,
+                    Ywindow=Ywindow,
+                    fftwindow=fftwindow,
+                )
 
     return tfs
 
@@ -960,7 +1033,7 @@ def record_single_output_excitation(sound, fs, out_ch=1, in_ch=1, **sd_kwargs):
     """
     out_ch = np.atleast_1d(out_ch)
     in_ch = np.atleast_1d(in_ch)
-    print(in_ch.copy())
+
     # make copies of mapping because of
     # github.com/spatialaudio/python-sounddevice/issues/135
     rec = sd.playrec(
@@ -972,13 +1045,13 @@ def record_single_output_excitation(sound, fs, out_ch=1, in_ch=1, **sd_kwargs):
         **sd_kwargs,
     )
 
-    return rec
+    return rec.T
 
 
 def record_multi_output_excitation(
     sound, fs_sound, out_ch, in_ch, n_avg=1, **sd_kwargs
 ):
-    """Meassure impulse response between multiple outputs and multiple inputs.
+    """Measure impulse response between multiple outputs and multiple inputs.
 
     Parameters
     ----------
@@ -995,29 +1068,18 @@ def record_multi_output_excitation(
 
     Returns
     -------
-    ndarray, shape (n_out, n_in, n_t)
+    ndarray, shape (n_out, n_in, n_avg, n_tap)
         Description
     """
     out_ch = np.atleast_1d(out_ch)
     in_ch = np.atleast_1d(in_ch)
 
-    recs = []
-    for i, oc in enumerate(out_ch):
-
-        rec = 0
-        for j in range(n_avg):
-
-            rec += (
-                record_single_output_excitation(
-                    sound, fs_sound, out_ch=oc, in_ch=in_ch, **sd_kwargs
-                )
-                / n_avg
+    recs = np.zeros((len(out_ch), len(in_ch), n_avg, len(sound)))
+    for o, oc in enumerate(out_ch):
+        for avg in range(n_avg):
+            recs[o, :, avg, :] = record_single_output_excitation(
+                sound, fs_sound, out_ch=oc, in_ch=in_ch, **sd_kwargs
             )
-
-        recs.append(rec.T)
-
-    recs = np.stack(recs, axis=0)  # shape (nout, nin, nt)
-
     return recs
 
 
@@ -1045,7 +1107,7 @@ def saverec_multi_output_excitation(
         Description
     in_ch : TYPE
         Description
-    ref_ch_indx : None, optional
+    ref_ch : None, optional
         Description
 
     Returns
@@ -1053,13 +1115,14 @@ def saverec_multi_output_excitation(
     ndarray, shape (n_out, n_in, n_t)
         in digital full scale (calibrate it!)
     """
+    start = datetime.now()
     recs = record_multi_output_excitation(
         sound, fs, out_ch, in_ch, n_avg=n_avg, **sd_kwargs
     )
 
     if add_datetime_to_name:
-        datetime_str = datetime.now().isoformat(" ", "seconds").replace(":", "-")
-        fn = filename + " - " + datetime_str
+        datetime_str = start.isoformat(" ", "seconds").replace(":", "-")
+        fn = str(filename) + " - " + datetime_str
     else:
         fn = filename
 
@@ -1072,7 +1135,8 @@ def saverec_multi_output_excitation(
         out_ch=out_ch,
         sound=sound,
         n_avg=n_avg,
-        datetime=datetime.now(),
+        datetime_start=start,
+        datetime_end=datetime.now(),
         description=description,
     )
 
