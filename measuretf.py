@@ -463,9 +463,11 @@ def transfer_function_with_reference(recs, ref=0, Ywindow=None, fftwindow=None):
     ----------
     recs : ndarray, shape (no, ni, navg, nt)
         Multichannel recording.
-    ref : int or or list of ints or ndarray
-        Index of reference channel in recs or the digital reference signal of shape
-        (no, nt)
+    ref : int or list[int] or ndarray
+        One of
+            - index of reference channel
+            - list of reference channels for each output
+            - a reference signals of shape (..., nt)
 
     Returns
     -------
@@ -490,7 +492,7 @@ def transfer_function_with_reference(recs, ref=0, Ywindow=None, fftwindow=None):
                     # ref is reference sound
                     r = ref
 
-                tfs[o, i] = transfer_function(
+                tfs[o, i, avg] = transfer_function(
                     r,
                     recs[o, i, avg],
                     ret_time=True,
