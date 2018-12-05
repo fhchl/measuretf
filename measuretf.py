@@ -194,7 +194,7 @@ def mls(order, fs, highpass=10, fade_alpha=0.1, pink=True):
 
 
 def pink_noise(
-    T, fs, tfade=0.1, flim=(5, 20e3), fknee=30, post_silence=0, noise="randphase"
+    T, fs, tfade=0.1, flim=None, fknee=30, post_silence=0, noise="randphase"
 ):
     """Generate pink noise.
 
@@ -215,6 +215,9 @@ def pink_noise(
         Pink noise
 
     """
+    if flim is None:
+        flim = (10, fs / 2 - 1)
+
     N = int(np.round(T * fs))
     Nf = N // 2 + 1
     f = np.linspace(0, fs / 2, Nf, endpoint=False)
@@ -235,6 +238,63 @@ def pink_noise(
     pink_weight[1:] /= f[1:]
     pink_weight[:ifknee] = pink_weight[ifknee]
     X *= pink_weight
+
+    x = np.fft.irfft(X, n=N)
+
+    # bandpass
+    b, a = butter(4, flim / (fs / 2), "bandpass")
+    x = lfilter(b, a, x)
+
+    if tfade:
+        # TODO: just use a tukey window here
+        n_fade = round(tfade * fs)
+        fading_window = hann(2 * n_fade)
+        x[:n_fade] = x[:n_fade] * fading_window[:n_fade]
+        x[-n_fade:] = x[-n_fade:] * fading_window[-n_fade:]
+
+    if post_silence > 0:
+        silence = np.zeros(int(round(post_silence * fs)))
+        x = np.concatenate((x, silence))
+
+    x /= np.abs(x).max()
+
+    return x
+
+
+def white_noise(
+    T, fs, tfade=0.1, flim=(5, 20e3), fknee=30, post_silence=0, noise="randphase"
+):
+    """Generate white noise.
+
+    Parameters
+    ----------
+    T : float
+        Length of sound.
+    fs : int
+        Sampling frequency.
+    tfade : float
+        Fade in and out time with Hann window.
+    flim : array_like
+        Length-2 sequence giving bandpass frequencies.
+
+    Returns
+    -------
+    ndarray, floats, shape (round(T*fs),)
+        Pink noise
+
+    """
+    N = int(np.round(T * fs))
+    Nf = N // 2 + 1
+    flim = np.asarray(flim)
+
+    if noise == "MLS":
+        order = int(np.ceil(np.log2(N)))
+        x = 2 * (max_len_seq(order)[0].astype(float) - 0.5)
+        x = x[:N]
+        X = np.fft.rfft(x)
+    else:  # noise == "randphase"
+        rand_phase = 2 * np.pi * np.random.random(Nf)
+        X = np.ones(Nf) * np.exp(1j * rand_phase)
 
     x = np.fft.irfft(X, n=N)
 
@@ -396,7 +456,7 @@ def multi_transfer_function(recs, ref_ch=0, ret_time=True):
     return tfs
 
 
-def transfer_function_with_reference(recs, Ywindow=None, ref=0, fftwindow=None):
+def transfer_function_with_reference(recs, ref=0, Ywindow=None, fftwindow=None):
     """Transfer-function between multichannel recording and reference channels.
 
     Parameters
@@ -412,8 +472,9 @@ def transfer_function_with_reference(recs, Ywindow=None, ref=0, fftwindow=None):
     ndarray, shape (no, ni, navg, nt)
         Transfer function between reference and measured signals in time
         domain.
+
+    TODO: merge with multi_transfer_function. They are basically the same.
     """
-    # TODO: make this work with multiple averages
     no, ni, navg, nt = recs.shape
     tfs = np.zeros((no, ni, navg, nt))
     for o in range(no):
@@ -2073,37 +2134,35 @@ def coherence_csd(x, y, fs, compensate_delay=True, **csd_kwargs):
     return f, gamma2
 
 
-def coherence(x, y, fs):
-    """Compute maginitude squared coherence of two signals.
+def coherence_from_averages(x, y, avgaxis=-2, axis=-1):
+    """Compute magnitude squared coherence of from several instances of two signals.
 
     Parameters
     ----------
     x, y : ndarray, float
-        Reference and measured signal in one dimensional arrays of same length.
-    fs : int
-        Sampling frequency
+        Reference and measured signal.
+    avgaxis : int, optional
+        Axis over which to average.
+    axis : int, optional
+        Axis over which to take coherence.
 
     Returns
     -------
-    f : ndarray
-        Array of sample frequencies.
-    H : ndarray
+    ndarray, float
         Magnitude squared coherence
+
     """
-    assert x.ndim == 1
-    assert y.ndim == 1
-    assert x.size == y.size
+    assert x.shape[axis] == y.shape[axis], "Need same nuber of datapoints"
 
-    n = len(x)
+    n = x.shape[axis]
+    npow2 = 2 ** (n - 1).bit_length()  # n of next power of 2
 
-    R_xy = np.correlate(x, y, mode="full")
-    R_xx = np.correlate(x, x, mode="full")
-    R_yy = np.correlate(y, y, mode="full")
+    X = np.fft.rfft(x, axis=axis, n=npow2)
+    S_xx = (np.abs(X) ** 2).mean(axis=avgaxis)
 
-    S_xy = np.fft.rfft(R_xy[R_xy.size // 2 :])
-    S_xx = np.fft.rfft(R_xy[R_xx.size // 2 :])
-    S_yy = np.fft.rfft(R_xy[R_yy.size // 2 :])
+    Y = np.fft.rfft(y, axis=axis, n=npow2)
+    S_yy = (np.abs(Y) ** 2).mean(axis=avgaxis)
 
-    gamma2 = np.abs(S_xy) ** 2 / (S_xx * S_yy)
+    S_xy = np.abs(X.conj() * Y).mean(axis=avgaxis)
 
-    return frequency_vector(n, fs), gamma2
+    return np.abs(S_xy) ** 2 / S_xx / S_yy
