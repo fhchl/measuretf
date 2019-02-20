@@ -1365,7 +1365,7 @@ def tf_and_post_from_saved_rec(
             ref = sound
 
     irs = transfer_function_with_reference(
-        recs, ref=ref, fwindow=fwindow, fftwindow=fftwindow
+        recs, ref=ref, Ywindow=fwindow, fftwindow=fftwindow
     )
 
     if plot:
@@ -1380,7 +1380,7 @@ def tf_and_post_from_saved_rec(
     if fs_resample is not None:
         irs = (
             Response.from_time(fs, irs)
-            .resample_poly(fs_resample, keep_gain=True)
+            .resample_poly(fs_resample, normalize="same_gain")
             .in_time
         )  # (nin, nt)
 
@@ -1440,7 +1440,7 @@ def tf_and_post_from_saved_rec_csd(
     if fs_resample is not None:
         recs = (
             Response.from_time(fs, recs)
-            .resample_poly(fs_resample, keep_gain=False)
+            .resample_poly(fs_resample, normalize="same_amplitude")
             .in_time
         )
         fs = int(fs_resample)
@@ -1513,7 +1513,7 @@ def lanxi_reference_calibration_gain(
     if fs_lanxi != fs:
         recs_lanxi = (
             Response.from_time(fs_lanxi, recs_lanxi)
-            .resample_poly(fs, keep_gain=False)
+            .resample_poly(fs, normalize="same_amplitude")
             .in_time
         )
         fs_lanxi = fs
@@ -2136,7 +2136,7 @@ def coherence_csd(x, y, fs, compensate_delay=True, **csd_kwargs):
     return f, gamma2
 
 
-def coherence_from_averages(x, y, avgaxis=-2, axis=-1):
+def coherence_from_averages(x, y, n='pow2', avgaxis=-2, axis=-1):
     """Compute magnitude squared coherence of from several instances of two signals.
 
     Parameters
@@ -2156,15 +2156,15 @@ def coherence_from_averages(x, y, avgaxis=-2, axis=-1):
     """
     assert x.shape[axis] == y.shape[axis], "Need same nuber of datapoints"
 
-    n = x.shape[axis]
-    npow2 = 2 ** (n - 1).bit_length()  # n of next power of 2
+    if n == 'pow2':
+        nt = x.shape[axis]
+        n = 2 ** (nt - 1).bit_length()  # n of next power of 2
 
-    X = np.fft.rfft(x, axis=axis, n=npow2)
+    X = np.fft.rfft(x, axis=axis, n=n)
+    Y = np.fft.rfft(y, axis=axis, n=n)
+
     S_xx = (np.abs(X) ** 2).mean(axis=avgaxis)
-
-    Y = np.fft.rfft(y, axis=axis, n=npow2)
     S_yy = (np.abs(Y) ** 2).mean(axis=avgaxis)
-
     S_xy = np.abs(X.conj() * Y).mean(axis=avgaxis)
 
     return np.abs(S_xy) ** 2 / S_xx / S_yy
