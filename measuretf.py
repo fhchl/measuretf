@@ -355,7 +355,9 @@ def multichannel_serial_sound(sound, n_ch, reference=False):
 # ESTIMATE TRANSFER FUNCTIONS
 
 
-def transfer_function(ref, meas, ret_time=True, axis=-1, Ywindow=None, fftwindow=None):
+def transfer_function(
+    ref, meas, ret_time=True, axis=-1, Ywindow=None, fftwindow=None, reg=0
+):
     """Compute transfer-function between time domain signals.
 
     Parameters
@@ -414,7 +416,7 @@ def transfer_function(ref, meas, ret_time=True, axis=-1, Ywindow=None, fftwindow
         )
         Y[too_large] = 0
 
-    H = Y / R
+    H = Y * R.conj() / (np.abs(R) ** 2 + reg)
 
     if ret_time:
         h = np.fft.irfft(H, axis=axis, n=ref.shape[axis])
@@ -2136,7 +2138,7 @@ def coherence_csd(x, y, fs, compensate_delay=True, **csd_kwargs):
     return f, gamma2
 
 
-def coherence_from_averages(x, y, n='pow2', avgaxis=-2, axis=-1):
+def coherence_from_averages(x, y, n="pow2", avgaxis=-2, axis=-1):
     """Compute magnitude squared coherence of from several instances of two signals.
 
     Parameters
@@ -2156,7 +2158,7 @@ def coherence_from_averages(x, y, n='pow2', avgaxis=-2, axis=-1):
     """
     assert x.shape[axis] == y.shape[axis], "Need same nuber of datapoints"
 
-    if n == 'pow2':
+    if n == "pow2":
         nt = x.shape[axis]
         n = 2 ** (nt - 1).bit_length()  # n of next power of 2
 
