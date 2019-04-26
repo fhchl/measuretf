@@ -1342,10 +1342,14 @@ def tf_and_post_from_saved_rec(
     fftwindow=None,
 ):
     with np.load(fname) as data:
-        recs = data["recs"]  # shape (n_out, n_in, nt)
+        recs = data["recs"]  # shape (n_out, n_in, navg, nt)
         fs = int(data["fs"])
         ref_ch = data["ref_ch"]
         sound = data["sound"]
+
+    # accept legancy format without reps (n_out, n_in, nt)
+    if recs.ndim == 3:
+        recs = recs[:, :, None, :]
 
     if calibration_gain is not None:
         recs = recs * np.asarray(calibration_gain)[None, :, None]
