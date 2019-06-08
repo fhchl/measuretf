@@ -891,7 +891,15 @@ def cut_recording(fname, cuts, names=None, remove_orig=False, outfolder=None):
         add = "-{}".format(names[i] if names is not None else i)
         parent = Path(outfolder) if outfolder is not None else path.parent
         newpath = parent / (path.stem + add)
-        np.savez(newpath, recs=r, fs=data["fs"], n_ch=r.shape[0], n_tap=r.shape[1])
+        np.savez(
+            newpath,
+            recs=r,
+            fs=data["fs"],
+            n_ch=r.shape[0],
+            n_tap=r.shape[1],
+            sound=data["sound"],
+            ref_ch=data["ref_ch"]
+        )
 
     data.close()
 
@@ -992,9 +1000,9 @@ def measure_multi_output_impulse_respone(
     timewindow=None,
     lowpass=None,
     calibration_gains=None,
-    **sd_kwargs,
+    **sd_kwargs
 ):
-    """Meassure impulse response between multiple outputs and multiple inputs.
+    """Measure impulse response between multiple outputs and multiple inputs.
 
     Parameters
     ----------
@@ -1013,17 +1021,19 @@ def measure_multi_output_impulse_respone(
     n_avg : int, optional
         Description
     tcut : None, optional
-        Description
+        Do a timecut
     timewindow : None, optional
-        Description
+        Do a timewindow
     lowpass : None, optional
         Description
+    calibration_gains : None, optional
+        If not note, Apply calibration gains to measurements
     **sd_kwargs
         Description
 
-    Returns
-    -------
-    ndarray, shape (n_out, n_in, n_t)
+    Return
+    ------------------
+    irs : ndarray, shape (n_out, n_in, n_t)
         Description
     """
     out_ch = np.atleast_1d(out_ch)
@@ -1254,7 +1264,8 @@ def plot_rec(fs, recs, **plot_kwargs):
     t = time_vector(recs.shape[-1], fs)
     for i in range(recs.shape[1]):
         for j in range(recs.shape[0]):
-            ax[i, j].plot(t, recs[j, i, :])
+            ax[i, j].set_title(f"Out: {j}, In: {i}")
+            ax[i, j].plot(t, recs[j, i].T)
     return fig
 
 
@@ -1344,8 +1355,8 @@ def tf_and_post_from_saved_rec(
     with np.load(fname) as data:
         recs = data["recs"]  # shape (n_out, n_in, navg, nt)
         fs = int(data["fs"])
-        ref_ch = data["ref_ch"]
         sound = data["sound"]
+        ref_ch = data["ref_ch"]
 
     # accept legancy format without reps (n_out, n_in, nt)
     if recs.ndim == 3:
@@ -1360,15 +1371,13 @@ def tf_and_post_from_saved_rec(
     if fwindow is not None:
         fwindow = (fs, *fwindow)
 
-    if ref is None:
-        # use sound or reference channel
-        if ref_ch is not None:
-            # use reference channel
-            ref = int(ref_ch)
-        else:
-            # Use sound
-            # NOTE: no calibration!
-            ref = sound
+    if ref == "sound":
+        # NOTE: no calibration!
+        ref = sound
+    elif ref is not None:
+        ref = int(ref)
+    else:
+        ref = int(ref_ch)
 
     irs = transfer_function_with_reference(
         recs, ref=ref, Ywindow=fwindow, fftwindow=fftwindow
@@ -2142,7 +2151,7 @@ def coherence_csd(x, y, fs, compensate_delay=True, **csd_kwargs):
     return f, gamma2
 
 
-def coherence_from_averages(x, y, n="pow2", avgaxis=-2, axis=-1):
+def coherence_from_averages(x, y, n="pow2", avgaxis=-2, axis=-1, reg=0):
     """Compute magnitude squared coherence of from several instances of two signals.
 
     Parameters
@@ -2152,7 +2161,7 @@ def coherence_from_averages(x, y, n="pow2", avgaxis=-2, axis=-1):
     avgaxis : int, optional
         Axis over which to average.
     axis : int, optional
-        Axis over which to take coherence.
+        Axis over which to take coherence (time axis).
 
     Returns
     -------
@@ -2171,6 +2180,6 @@ def coherence_from_averages(x, y, n="pow2", avgaxis=-2, axis=-1):
 
     S_xx = (np.abs(X) ** 2).mean(axis=avgaxis)
     S_yy = (np.abs(Y) ** 2).mean(axis=avgaxis)
-    S_xy = np.abs(X.conj() * Y).mean(axis=avgaxis)
+    S_xy = (X.conj() * Y).mean(axis=avgaxis)
 
-    return np.abs(S_xy) ** 2 / S_xx / S_yy
+    return np.abs(S_xy) ** 2 / (S_xx * S_yy + reg)
