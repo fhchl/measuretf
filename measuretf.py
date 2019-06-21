@@ -356,7 +356,12 @@ def multichannel_serial_sound(sound, n_ch, reference=False):
 
 
 def transfer_function(
-    ref, meas, ret_time=True, axis=-1, Ywindow=None, fftwindow=None, reg=0
+    ref, meas, ret_time=True,
+    axis=-1,
+    Ywindow=None,
+    fftwindow=None,
+    reg=0,
+    reg_lim_dB=None
 ):
     """Compute transfer-function between time domain signals.
 
@@ -377,6 +382,11 @@ def transfer_function(
     fftwindow : None, optional
         Apply a Tukey time window to meas before doing the fft removing clicks at the
         end and beginning of the recording.
+    reg : float
+        Regularization in deconvolution
+    reg_lim_dB: float
+        Regularize such that reference has at least reg_lim_dB below of maximum energy
+        in each bin.
 
     Returns
     -------
@@ -415,6 +425,17 @@ def transfer_function(
             f"Some TF gains larger than {20*np.log10(TOO_LARGE_GAIN):.0f} dB. Setting to 0"
         )
         Y[too_large] = 0
+
+    if reg_lim_dB is not None:
+        # maximum of reference
+        maxRdB = np.max(20 * np.log10(np.abs(R)), axis=axis)
+
+        # power in reference should be at least
+        minRdB = maxRdB - reg_lim_dB
+
+        # 10 * log10(reg + |R|**2) = minRdB
+        reg = 10**(minRdB / 10) - np.abs(R)**2
+        reg[reg < 0] = 0
 
     H = Y * R.conj() / (np.abs(R) ** 2 + reg)
 
@@ -458,7 +479,9 @@ def multi_transfer_function(recs, ref_ch=0, ret_time=True):
     return tfs
 
 
-def transfer_function_with_reference(recs, ref=0, Ywindow=None, fftwindow=None):
+def transfer_function_with_reference(
+        recs, ref=0, Ywindow=None, fftwindow=None, reg=0, reg_lim_dB=None
+    ):
     """Transfer-function between multichannel recording and reference channels.
 
     Parameters
@@ -500,6 +523,8 @@ def transfer_function_with_reference(recs, ref=0, Ywindow=None, fftwindow=None):
                     ret_time=True,
                     Ywindow=Ywindow,
                     fftwindow=fftwindow,
+                    reg=reg,
+                    reg_lim_dB=reg_lim_dB
                 )
 
     return tfs
@@ -880,14 +905,20 @@ def transfer_functions_from_recordings(
     return H, fs, n_tap
 
 
-def cut_recording(fname, cuts, names=None, remove_orig=False, outfolder=None):
+def cut_recording(fname, cuts, names=None, remove_orig=False, outfolder=None,
+    shift_before_cut=0):
     """Cut recordings at samples.
     """
     data = np.load(fname)
-    recs = np.split(data["recs"], cuts, axis=-1)
+    recs = data["recs"]
+    if shift_before_cut:
+        recs = np.roll(recs, shift_before_cut, axis=-1)
+    recs = np.split(recs, cuts, axis=-1)
+    sounds = np.split(data["sound"].T, cuts, axis=-1)
     path = Path(fname)
 
-    for i, r in enumerate(recs):
+    for i, rs in enumerate(zip(recs, sounds)):
+        r, s = rs
         add = "-{}".format(names[i] if names is not None else i)
         parent = Path(outfolder) if outfolder is not None else path.parent
         newpath = parent / (path.stem + add)
@@ -897,7 +928,7 @@ def cut_recording(fname, cuts, names=None, remove_orig=False, outfolder=None):
             fs=data["fs"],
             n_ch=r.shape[0],
             n_tap=r.shape[1],
-            sound=data["sound"],
+            sound=s,
             ref_ch=data["ref_ch"]
         )
 
@@ -1351,6 +1382,7 @@ def tf_and_post_from_saved_rec(
     ref=None,
     calibration_gain=None,
     fftwindow=None,
+    reg_lim_dB=None,
 ):
     with np.load(fname) as data:
         recs = data["recs"]  # shape (n_out, n_in, navg, nt)
@@ -1363,7 +1395,7 @@ def tf_and_post_from_saved_rec(
         recs = recs[:, :, None, :]
 
     if calibration_gain is not None:
-        recs = recs * np.asarray(calibration_gain)[None, :, None]
+        recs = recs * np.asarray(calibration_gain)[None, :, None, None]
 
     if plot:
         Response.from_time(fs, recs).plot(figsize=(10, 10))
@@ -1380,7 +1412,7 @@ def tf_and_post_from_saved_rec(
         ref = int(ref_ch)
 
     irs = transfer_function_with_reference(
-        recs, ref=ref, Ywindow=fwindow, fftwindow=fftwindow
+        recs, ref=ref, Ywindow=fwindow, fftwindow=fftwindow, reg_lim_dB=reg_lim_dB,
     )
 
     if plot:
@@ -1862,7 +1894,7 @@ def freq_window(fs, n, startwindow, stopwindow, window="hann"):
     if stopwindow is not None:
         stopwindow_n = [find_nearest(freqs, f)[1] for f in stopwindow]
     else:
-        startwindow_n = None
+        stopwindow_n = None
 
     fwindow = sample_window(nf, startwindow_n, stopwindow_n, window=window)
 
