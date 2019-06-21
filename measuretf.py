@@ -25,6 +25,7 @@ from scipy.io import loadmat, wavfile
 
 
 def is_ipynb():
+    """Check if environment is jupyter notebook."""
     try:
         shell = get_ipython().__class__.__name__
         if shell == "ZMQInteractiveShell":
@@ -143,6 +144,7 @@ def synchronized_swept_sine(
     .. _Novak:
        A. Novak, P. Lotton, and L. Simon, “Transfer-Function Measurement with Sweeps *,”
        Journal of the Audio Engineering Society, vol. 63, no. 10, pp. 786–798, 2015.
+
     """
     assert f_start < f_end
     assert f_end <= fs / 2
@@ -319,8 +321,7 @@ def white_noise(
 
 
 def multichannel_serial_sound(sound, n_ch, reference=False):
-    """Generate a multichannel array with sound in series on each
-    channel.
+    """Generate a multichannel array with sound in series on each channel.
 
     Parameters
     ----------
@@ -336,6 +337,7 @@ def multichannel_serial_sound(sound, n_ch, reference=False):
     -------
     ndarray, shape (sound.size, n_ch(+1))
         Multichannel sound.
+
     """
     N = sound.size
 
@@ -391,8 +393,8 @@ def transfer_function(
     Returns
     -------
     h : ndarray, float
-        Transfer-function between ref and
-        meas.
+        Transfer-function between ref and meas.
+
     """
     # NOTE: is this used anywhere? If not remove
     if fftwindow:
@@ -461,6 +463,7 @@ def multi_transfer_function(recs, ref_ch=0, ret_time=True):
     ndarray, shape (n_ch, n_ls, n_avg, n_tap)
         Transfer function between reference and measured signals in time
         domain.
+
     """
     n_ch, n_ls, n_avg, n_tap = recs.shape
 
@@ -481,7 +484,7 @@ def multi_transfer_function(recs, ref_ch=0, ret_time=True):
 
 def transfer_function_with_reference(
         recs, ref=0, Ywindow=None, fftwindow=None, reg=0, reg_lim_dB=None
-    ):
+):
     """Transfer-function between multichannel recording and reference channels.
 
     Parameters
@@ -501,6 +504,7 @@ def transfer_function_with_reference(
         domain.
 
     TODO: merge with multi_transfer_function. They are basically the same.
+
     """
     no, ni, navg, nt = recs.shape
     tfs = np.zeros((no, ni, navg, nt))
@@ -557,6 +561,7 @@ def transfer_function_csd(x, y, fs, compensate_delay=True, fwindow=None, **kwarg
     H : ndarray, complex
         Transfer-function between ref and
         meas.
+
     """
     assert x.ndim == 1
     assert y.ndim == 1
@@ -603,6 +608,7 @@ def header_info(fname):
         Number of samples per channel.
     n_ch : int
         Nuber of Channels
+
     """
     data = loadmat(fname, struct_as_record=False, squeeze_me=True)
     fh = data["File_Header"]
@@ -633,6 +639,7 @@ def load_mat_recording(fname, n_ls=1, n_avg=1, fullout=False):
         Recordings, sliced into averages and output channels.
     fs : int
         Sampling frequency.
+
     """
     data = loadmat(fname, struct_as_record=False, squeeze_me=True)
     fh = data["File_Header"]
@@ -671,8 +678,8 @@ def load_npz_recording(fname, n_ls=1, n_avg=1, fullout=False):
         Recordings, sliced into averages and output channels.
     fs : int
         Sampling frequency.
-    """
 
+    """
     with np.load(fname) as data:
         fs = data["fs"]
         n_otap = data["n_tap"]
@@ -718,6 +725,7 @@ def load_recording(fname, n_ls=1, n_avg=1, fullout=False):
         Recordings, sliced into averages and output channels.
     fs : int
         Sampling frequency.
+
     """
     fname = Path(fname)
     if fname.suffix == ".mat":
@@ -781,6 +789,7 @@ def folder_convert_TDRmat_recording_to_npz(path, output_folder=None, unlink=Fals
         Number of recorded averages.
     folder : None or Path, optional
         Save in this folder, instead of same folder as fname (default)
+
     """
     # delete content of outputfolder
     if output_folder is not None:
@@ -835,6 +844,7 @@ def transfer_functions_from_recordings(
     -------
     ndarray,
         Transfer-functions, shape (n_meas, n_ch - 1, n_ls, n_avg, n_tap // 2 + 1)
+
     """
     fpath = Path(fp)
 
@@ -907,8 +917,7 @@ def transfer_functions_from_recordings(
 
 def cut_recording(fname, cuts, names=None, remove_orig=False, outfolder=None,
     shift_before_cut=0):
-    """Cut recordings at samples.
-    """
+    """Cut recordings at samples."""
     data = np.load(fname)
     recs = data["recs"]
     if shift_before_cut:
@@ -971,6 +980,7 @@ def measure_single_output_impulse_response(
     -------
     ndarray, shape (n_in, nt)
         Impulse response between output channel and input channels
+
     """
     out_ch = np.atleast_1d(out_ch)
     in_ch = np.atleast_1d(in_ch)
@@ -1066,6 +1076,7 @@ def measure_multi_output_impulse_respone(
     ------------------
     irs : ndarray, shape (n_out, n_in, n_t)
         Description
+
     """
     out_ch = np.atleast_1d(out_ch)
     in_ch = np.atleast_1d(in_ch)
@@ -1136,6 +1147,7 @@ def record_single_output_excitation(sound, fs, out_ch=1, in_ch=1, **sd_kwargs):
     -------
     ndarray, shape (n_in, nt)
         Impulse response between output channel and input channels
+
     """
     out_ch = np.atleast_1d(out_ch)
     in_ch = np.atleast_1d(in_ch)
@@ -1176,6 +1188,7 @@ def record_multi_output_excitation(
     -------
     ndarray, shape (n_out, n_in, n_avg, n_tap)
         Description
+
     """
     out_ch = np.atleast_1d(out_ch)
     in_ch = np.atleast_1d(in_ch)
@@ -1220,6 +1233,7 @@ def saverec_multi_output_excitation(
     -------
     ndarray, shape (n_out, n_in, n_t)
         in digital full scale (calibrate it!)
+
     """
     start = datetime.now()
     recs = record_multi_output_excitation(
@@ -1313,6 +1327,7 @@ def load_rec(fname, plot=True, **plot_kwargs):
     Returns
     -------
     recs, fs, ref_ch
+
     """
     with np.load(fname) as data:
         recs = data["recs"]  # shape (n_out, n_in, nt)
@@ -1701,6 +1716,7 @@ def exponential_sweep_harmonic_delay(T, fs, N, f_start=None, f_end=None):
        of impulse response and distortion
        with a swept-sine techniqueMinnaar, Pauli,” in Proc. AES 108th conv,
        Paris, France, 2000, pp. 1–15.
+
     """
     n_tap = int(np.round(T * fs))
 
@@ -1731,6 +1747,7 @@ def harmonic_spectrum(r, fs, order=10):
     -------
     ndarray, length order
         The energy of the nth order harmonics in the impules response.
+
     """
     n = r.size
     orders = np.arange(1, order + 2)
@@ -1777,6 +1794,7 @@ def thd(r, fs, order=10):
     -------
     float
         THD.
+
     """
     e = harmonic_spectrum(r, fs, order=order)
     return np.sqrt(np.sum(e[1:]) / e[0])
@@ -1810,6 +1828,7 @@ def lowpass_by_frequency_domain_window(fs, x, fstart, fstop, axis=-1):
     ------
     ValueError
         If fstart or fstop don't fit in the frequency range.
+
     """
 
     n = x.shape[axis]
@@ -1863,7 +1882,6 @@ def sample_window(n, startwindow, stopwindow, window="hann"):
 
 def time_window(fs, n, startwindow, stopwindow, window="hann"):
     """Create a time domain window."""
-
     times = time_vector(n, fs)
 
     if startwindow is not None:
@@ -1882,7 +1900,6 @@ def time_window(fs, n, startwindow, stopwindow, window="hann"):
 
 def freq_window(fs, n, startwindow, stopwindow, window="hann"):
     """Create a frequency domain window."""
-
     freqs = frequency_vector(n, fs)
     nf = len(freqs)
 
@@ -1902,8 +1919,7 @@ def freq_window(fs, n, startwindow, stopwindow, window="hann"):
 
 
 def mutliconvolve(sound, h, plot=False):
-    """Convolve signel channel sound with multichannel impulse response.
-    """
+    """Convolve signel channel sound with multichannel impulse response."""
     nch = h.shape[-1]
     nfilt = h.shape[0]
     nsound = sound.shape[0]
@@ -1950,6 +1966,7 @@ def frequency_vector(n, fs, sided="single"):
 
     ALTERNATIVELY:
         np.abs(np.fft.fftfreq(n, 1)[:n // 2 + 1])
+
     """
     if sided == "single":
         f = np.arange(n // 2 + 1, dtype=float) * fs / n
@@ -2128,8 +2145,7 @@ def time_align(x, y, fs):
 
 
 def time_align_y(x, y, fs):
-    """Time align y to match x.
-    """
+    """Time align y to match x."""
     n = x.size
 
     # delta time array to match xcorr
@@ -2166,6 +2182,7 @@ def coherence_csd(x, y, fs, compensate_delay=True, **csd_kwargs):
         Array of sample frequencies.
     gamma2 : ndarray
         Magnitude squared coherence
+
     """
     assert x.ndim == 1
     assert y.ndim == 1
