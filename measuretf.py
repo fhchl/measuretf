@@ -24,7 +24,7 @@ from scipy.signal import (
 from scipy.io import loadmat, wavfile
 
 
-def is_ipynb():
+def _is_ipynb():
     """Check if environment is jupyter notebook."""
     try:
         shell = get_ipython().__class__.__name__
@@ -38,7 +38,7 @@ def is_ipynb():
         return False  # Probably standard Python interpreter
 
 
-if is_ipynb():
+if _is_ipynb():
     from tqdm import tqdm_notebook as tqdm
 else:
     from tqdm import tqdm
