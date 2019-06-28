@@ -5,5 +5,13 @@ setup(
     name="measuretf",
     version="0.2",
     packages=["measuretf"],
-    install_requires=["numpy", "scipy", "tqdm", "matplotlib", "sounddevice", "response"],
+    install_requires=[
+        "numpy",
+        "scipy",
+        "tqdm",
+        "matplotlib",
+        "sounddevice",
+        "response",
+        "pysoundfile",
+    ],
 )

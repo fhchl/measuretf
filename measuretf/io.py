@@ -2,8 +2,61 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.io import wavfile
+import soundfile as sf
+
+from pathlib import Path
 from datetime import datetime
+
+from measuretf.utils import plot_rec
+
+
+def load_recording(fname, n_out=1, n_avg=1):
+    """Load recording and split according to number of sources and averages.
+
+    Parameters
+    ----------
+    fname : str
+        Name of the mat file. Can also pass open file-like object. Reference
+        channel is assumed to be recorded in first channel.
+    n_out : int, optional
+        Number of simultaneously, in series recorded output channels.
+    n_avg : int, optional
+        Number of recorded averages.
+
+    Returns
+    -------
+    recs : ndarray, shape (n_in, n_out, n_avg, n_tap)
+        Recordings, sliced into averages and output channels.
+    fs : int
+        Sampling frequency.
+
+    """
+    fname = Path(fname)
+
+    if fname.suffix == 'npz':
+        with np.load(fname) as data:
+            fs = data["fs"]
+            orecs = data["recs"]  # has shape n_in x n_tap
+    else:
+        orecs, fs = sf.read(fname)
+
+    n_in, n_otap = orecs.shape
+
+    n_tap = n_otap / n_out / n_avg
+    if n_tap.is_integer():
+        n_tap = int(n_tap)
+    else:
+        raise ValueError("Can't split recording: n_tap is not an integer")
+
+    recs = np.zeros((n_in, n_out, n_avg, n_tap))
+    for i in range(n_in):
+        # shape  (ntaps*n_avg*n_out, ) -> (n_out, ntaps*n_avg)
+        temp = np.array(np.split(orecs[i], n_out))
+        temp = np.array(np.split(temp, n_avg, axis=-1))  # (n_avg, n_out, n_taps)
+        temp = np.moveaxis(temp, 0, 1)  # (n_out, n_avg, n_taps)
+        recs[i] = temp
+
+    return recs, fs
 
 
 def convert_wav_to_recording(
@@ -15,7 +68,7 @@ def convert_wav_to_recording(
     description=None,
     plot=False,
 ):
-    """Convert WAV recording to npz recording.
+    """Convert WAV recording to npz recording. Split for fit.
 
     Parameters
     ----------
@@ -36,10 +89,8 @@ def convert_wav_to_recording(
         Description
 
     """
-    fs, recs = wavfile.read(wavfname)
-
-    if recs.ndim == 1:
-        recs = np.atleast_2d(recs).T
+    recs, fs = sf.read(wavfname, always_2d=True)
+    recs = recs.T  # (n_ch, n_samples) -> (n_samples, n_ch)
 
     # remove samples for clean split
     remove_samples = recs.shape[0] % n_out

@@ -5,14 +5,18 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import matplotlib.pyplot as plt
 import sounddevice as sd
 from response import Response
-from scipy.signal import tukey, csd, welch
+from scipy.signal import tukey, csd, welch, butter, hann, lfilter
 
 from measuretf.utils import time_align
-from measuretf.fft import time_vector
-from measuretf.filtering import freq_window
+from measuretf.filtering import (
+    freq_window,
+    time_window,
+    lowpass_by_frequency_domain_window,
+)
+from measuretf.io import load_recording
+from measuretf.utils import tqdm
 
 
 def transfer_function(
@@ -84,7 +88,7 @@ def transfer_function(
     too_large = np.abs(Y / R) > TOO_LARGE_GAIN
     if np.any(too_large):
         warnings.warn(
-            f"Some TF gains larger than {20*np.log10(TOO_LARGE_GAIN):.0f} dB. Setting to 0"
+            f"TF gains larger than {20*np.log10(TOO_LARGE_GAIN):.0f} dB. Setting to 0"
         )
         Y[too_large] = 0
 
@@ -247,6 +251,114 @@ def transfer_function_csd(x, y, fs, compensate_delay=True, fwindow=None, **kwarg
         H *= W
 
     return f, H
+
+
+def transfer_functions_from_recordings(
+    fp,
+    n_ls,
+    n_meas,
+    fformat="Recording-{}.mat",
+    n_avg=1,
+    ref_ch=0,
+    lowpass_lim=None,
+    lowpass_butt=None,
+    twindow=None,
+    take_T=None,
+    H_comp=None,
+):
+    """Calculate transfer-functions from a set of recordings inside a folder.
+
+    Parameters
+    ----------
+    fp : str or Path
+        Path to folder.
+    n_ls : int
+        Number of serially measured channels.
+    n_meas : int
+        Total number of recordings
+    H_comp : None or ndarray, shape (n_ch - 1, nf), optional
+        If present, apply a compensation filter to each single recording.
+    fformat : str, optional
+        Recording file naming. Must include one '{}' to enumerate.
+    n_avg : int, optional
+        Number of averages.
+    ref_ch : int, optional
+        Index of reference channel
+    lowpass_lim : None or Tuple, optional
+        Tuple (fl, fu) that defines transition range of lowpass filter.
+    twindow : None or tuple
+        Specify time domain window.
+    take_T : float or None, optional
+        If float, only take the take_T first seconds of the impulse responses.
+        if twindiow==None: Hann window in last 5%.
+
+    Returns
+    -------
+    ndarray,
+        Transfer-functions, shape (n_meas, n_ch - 1, n_ls, n_avg, n_tap // 2 + 1)
+
+    """
+    fpath = Path(fp)
+
+    # read meta data from first recording
+    fname = fpath / fformat.format(1)
+    _, fs, n_ch, n_tap = load_recording(fname, n_ls=n_ls, n_avg=n_avg, fullout=True)
+
+    if take_T is not None:
+        # only take first take_T seconds of impulse responses
+        n_tap = int(np.ceil(take_T * fs))
+    else:
+        n_tap = int(n_tap / n_ls / n_avg)
+
+    shape_H = (n_meas, n_ch - 1, n_ls, n_avg, n_tap // 2 + 1)
+    H = np.zeros(shape_H, dtype=complex)
+
+    if H_comp is not None:
+        # cut H to same length in time domain
+        H_comp = Response.from_freq(int(fs), H_comp).ncshrink(n_tap * 1 / fs).in_freq
+
+    for i in tqdm(np.arange(n_meas)):
+        fname = fpath / fformat.format(i + 1)
+
+        # load time domain recordings
+        temp, fs = load_recording(fname, n_ls=n_ls, n_avg=n_avg)
+        temp = multi_transfer_function(temp, ref_ch=ref_ch, ret_time=True)
+
+        # exclude reference channel
+        temp = np.delete(temp, 0, axis=0)
+
+        if take_T is not None:
+            # only take first take_T seconds
+            temp = temp[..., :n_tap]
+            if twindow is None:
+                # time window the tail
+                nwin = int(round(take_T * 0.05 * fs))
+                w = hann(2 * nwin)[nwin:]
+                temp[..., -nwin:] *= w
+
+        if H_comp is not None:
+            # convolve with compensation filter
+            Temp = np.fft.rfft(temp) * H_comp[:, None, None, :]
+            temp = np.fft.irfft(Temp, n=n_tap)
+            del Temp
+
+        if lowpass_lim is not None:
+            # filter out HF noise with zero phase frequency domain window
+            temp = lowpass_by_frequency_domain_window(fs, temp, *lowpass_lim)
+
+        if lowpass_butt is not None:
+            # filter HF noise with butterworth
+            order, cutoff = lowpass_butt
+            b, a = butter(order, cutoff / (fs / 2), "low")
+            temp = lfilter(b, a, temp, axis=-1)
+
+        if twindow is not None:
+            T = time_window(fs, n_tap, *twindow)
+            temp *= T
+
+        H[i] = np.fft.rfft(temp)
+
+    return H, fs, n_tap
 
 
 def coherence_csd(x, y, fs, compensate_delay=True, **csd_kwargs):
@@ -573,9 +685,75 @@ def record_single_output_excitation(sound, fs, out_ch=1, in_ch=1, **sd_kwargs):
     return rec.T
 
 
-def record_multi_output_excitation(
-    sound, fs, out_ch, in_ch, n_avg=1, **sd_kwargs
+def recordsave_single_output_excitation(
+    filename,
+    sound,
+    fs,
+    out_ch,
+    in_ch,
+    ref_ch=None,
+    add_datetime_to_name=False,
+    description="",
+    **sd_kwargs,
 ):
+    """Record and save a single sound (multichannel) excitation.
+
+    Parameters
+    ----------
+    filename : str or Path
+        Save recodring at this path.
+    sound : ndarray, shape (nt, n_out)
+        Excitation signal
+    fs : int
+        Sampling rate of sound
+    out_ch : int or list
+        Output channels
+    in_ch : int or list
+        Input channels
+    ref_ch : None, optional
+        Mark this input channel as the reference channel
+    add_datetime_to_name : bool, optional
+        Add a datetime to file name.
+    description : str, optional
+        Add a description to file.
+    sd_kwargs : dict, optional
+        Keyword arguments to `sounddevice.playrec`.
+
+    Returns
+    -------
+    ndarray, shape (n_out, n_in, n_avg, n_t)
+        Recorded signals.
+
+    """
+    start = datetime.now()
+    recs = record_single_output_excitation(
+        sound, fs, out_ch=out_ch, in_ch=in_ch, **sd_kwargs
+    )
+    end = datetime.now()
+
+    if add_datetime_to_name:
+        datetime_str = start.isoformat(" ", "seconds").replace(":", "-")
+        fn = str(filename) + " - " + datetime_str
+    else:
+        fn = filename
+
+    np.savez(
+        fn,
+        recs=recs,
+        ref_ch=ref_ch,
+        fs=fs,
+        in_ch=in_ch,
+        out_ch=out_ch,
+        sound=sound,
+        datetime_start=start,
+        datetime_end=end,
+        description=description,
+    )
+
+    return recs
+
+
+def record_multi_output_excitation(sound, fs, out_ch, in_ch, n_avg=1, **sd_kwargs):
     """Record the excitation of multiple outputs at multiple inputs.
 
     Parameters
@@ -656,6 +834,7 @@ def recordsave_multi_output_excitation(
     recs = record_multi_output_excitation(
         sound, fs, out_ch, in_ch, n_avg=n_avg, **sd_kwargs
     )
+    end = datetime.now()
 
     if add_datetime_to_name:
         datetime_str = start.isoformat(" ", "seconds").replace(":", "-")
@@ -673,7 +852,7 @@ def recordsave_multi_output_excitation(
         sound=sound,
         n_avg=n_avg,
         datetime_start=start,
-        datetime_end=datetime.now(),
+        datetime_end=end,
         description=description,
     )
 
@@ -688,7 +867,7 @@ def recordsave_recording(
     ref_ch=None,
     add_datetime_to_name=False,
     description="",
-    **sd_kwargs
+    **sd_kwargs,
 ):
     """Record and save signals.
 
@@ -742,45 +921,6 @@ def recordsave_recording(
 
 
 # FOR KFF18
-
-
-def plot_rec(fs, recs, **plot_kwargs):
-    """Plot a recording."""
-    recs = np.atleast_3d(recs.T).T
-    fig, ax = plt.subplots(
-        nrows=recs.shape[1], ncols=recs.shape[0], squeeze=False, **plot_kwargs
-    )
-    t = time_vector(recs.shape[-1], fs)
-    for i in range(recs.shape[1]):
-        for j in range(recs.shape[0]):
-            ax[i, j].set_title(f"Out: {j}, In: {i}")
-            ax[i, j].plot(t, recs[j, i].T)
-    return fig
-
-
-def load_rec(fname, plot=True, **plot_kwargs):
-    """Show content of saved recording.
-
-    Parameters
-    ----------
-    fname : path
-        Recording in npz format
-    plot : bool, optional
-        If true, plot recording
-
-    Returns
-    -------
-    recs, fs, ref_ch
-
-    """
-    with np.load(fname) as data:
-        recs = data["recs"]  # shape (n_out, n_in, nt)
-        fs = int(data["fs"])
-        ref_ch = data["ref_ch"]
-
-    if plot:
-        plot_rec(fs, recs, **plot_kwargs)
-    return recs, fs, ref_ch
 
 
 def tf_and_post_from_saved_rec(

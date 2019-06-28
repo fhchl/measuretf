@@ -284,8 +284,8 @@ def white_noise(
     return x
 
 
-def multichannel_serial_sound(sound, n_ch, reference=False):
-    """Generate a multichannel array with sound in series on each channel.
+def multichannel_serial_sound(sound, n_ch, reps=1, reference=False):
+    """Generate a multichannel excitation that excites each channel with sound.
 
     Parameters
     ----------
@@ -303,16 +303,20 @@ def multichannel_serial_sound(sound, n_ch, reference=False):
         Multichannel sound.
 
     """
+    assert sound.ndim == 1
+
     N = sound.size
 
-    if reference:
-        msound = np.zeros((n_ch * N, n_ch + 1))
-    else:
-        msound = np.zeros((n_ch * N, n_ch))
+    repsound = np.tile(sound, reps)
+
+    multisound = np.zeros((n_ch * reps * N, n_ch))
 
     for ch in range(n_ch):
-        msound[ch * N : (ch + 1) * N, ch] = sound
-        if reference:
-            msound[ch * N : (ch + 1) * N, -1] = sound
+        multisound[ch * reps * N : (ch + 1) * reps * N, ch] = repsound
 
-    return msound
+    if reference:
+        multisound = np.concatenate(
+            (multisound, multisound.sum(axis=-1)[:, None]), axis=-1
+        )
+
+    return multisound

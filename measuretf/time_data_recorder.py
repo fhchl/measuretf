@@ -3,17 +3,43 @@
 import numpy as np
 
 from response import Response
-from pathlib import Path
 from scipy.io import loadmat
-from scipy.signal import hann, butter, lfilter
+from pathlib import Path
 
-from measuretf import multi_transfer_function
-from measuretf.filtering import lowpass_by_frequency_domain_window, time_window
 from measuretf.utils import tqdm
+from measuretf.io import load_recording as load_npz_recording
 
 
-def load_bk_mat_recording(fname, n_ls=1, n_avg=1, fullout=False):
-    """Load multichannel Time Data Recording into ndarray.
+def header_info(fname):
+    """Header information of MAT-file exported by Time Data Recorder.
+
+    Parameters
+    ----------
+    fname : str
+        Name of the mat file. Can also pass open file-like object.
+
+    Returns
+    -------
+    fs : int
+        Sampling frequency.
+    n_tap : int
+        Number of samples per channel.
+    n_ch : int
+        Nuber of Channels
+
+    """
+    data = loadmat(fname, struct_as_record=False, squeeze_me=True)
+    fh = data["File_Header"]
+
+    fs = int(float(fh.SampleFrequency))
+    n_tap = int(fh.NumberOfSamplesPerChannel)
+    n_ch = int(fh.NumberOfChannels)
+
+    return fs, n_tap, n_ch
+
+
+def load_mat_recording(fname, n_ls=1, n_avg=1, fullout=False):
+    """Load multichannel B&K Time Data Recording into ndarray.
 
     Parameters
     ----------
@@ -51,54 +77,7 @@ def load_bk_mat_recording(fname, n_ls=1, n_avg=1, fullout=False):
     return recs, fs
 
 
-def load_bk_npz_recording(fname, n_ls=1, n_avg=1, fullout=False):
-    """Load multichannel Time Data Recording into ndarray.
-
-    Parameters
-    ----------
-    fname : str
-        Name of the mat file. Can also pass open file-like object. Reference
-        channel is assumed to be recorded in first channel.
-    n_ls : int, optional
-        Number of simultaneously, in series recorded output channels.
-    n_avg : int, optional
-        Number of recorded averages.
-
-    Returns
-    -------
-    recs : ndarray, shape (n_ch, n_ls, n_avg, n_tap)
-        Recordings, sliced into averages and output channels.
-    fs : int
-        Sampling frequency.
-
-    """
-    with np.load(fname) as data:
-        fs = data["fs"]
-        n_otap = data["n_tap"]
-        n_ch = data["n_ch"]
-        orecs = data["recs"]  # has shape n_ch x n_taps
-
-    n_tap = n_otap / n_ls / n_avg
-    if n_tap.is_integer():
-        n_tap = int(n_tap)
-    else:
-        raise ValueError("n_tap is not an integer")
-
-    recs = np.zeros((n_ch, n_ls, n_avg, n_tap))
-    for i in range(n_ch):
-        # shape  (ntaps*n_avg*n_ls, ) -> (n_ls, ntaps*n_avg)
-        temp = np.array(np.split(orecs[i], n_ls))
-        temp = np.array(np.split(temp, n_avg, axis=-1))  # (n_avg, n_ls, n_taps)
-        temp = np.moveaxis(temp, 0, 1)  # (n_ls, n_avg, n_taps)
-        recs[i] = temp
-
-    if fullout:
-        return recs, fs, n_ch, n_tap
-
-    return recs, fs
-
-
-def load_bk_recording(fname, n_ls=1, n_avg=1, fullout=False):
+def load_recording(fname, n_ls=1, n_avg=1, fullout=False):
     """Load multichannel Time Data Recording into ndarray.
 
     Parameters
@@ -121,11 +100,11 @@ def load_bk_recording(fname, n_ls=1, n_avg=1, fullout=False):
     """
     fname = Path(fname)
     if fname.suffix == ".mat":
-        recs, fs, n_ch, n_tap = load_bk_mat_recording(
+        recs, fs, n_ch, n_tap = load_mat_recording(
             fname, n_ls=n_ls, n_avg=n_avg, fullout=True
         )
     elif fname.suffix == ".npz":
-        recs, fs, n_ch, n_tap = load_bk_npz_recording(
+        recs, fs, n_ch, n_tap = load_npz_recording(
             fname, n_ls=n_ls, n_avg=n_avg, fullout=True
         )
 
@@ -133,34 +112,6 @@ def load_bk_recording(fname, n_ls=1, n_avg=1, fullout=False):
         return recs, fs, n_ch, n_tap
 
     return recs, fs
-
-
-def header_info(fname):
-    """Header information of MAT-file exported by Time Data Recorder.
-
-    Parameters
-    ----------
-    fname : str
-        Name of the mat file. Can also pass open file-like object.
-
-    Returns
-    -------
-    fs : int
-        Sampling frequency.
-    n_tap : int
-        Number of samples per channel.
-    n_ch : int
-        Nuber of Channels
-
-    """
-    data = loadmat(fname, struct_as_record=False, squeeze_me=True)
-    fh = data["File_Header"]
-
-    fs = int(float(fh.SampleFrequency))
-    n_tap = int(fh.NumberOfSamplesPerChannel)
-    n_ch = int(fh.NumberOfChannels)
-
-    return fs, n_tap, n_ch
 
 
 def convert_TDRmat_recording_to_npz(fname, output_folder=None):
@@ -222,109 +173,59 @@ def folder_convert_TDRmat_recording_to_npz(path, output_folder=None, unlink=Fals
         convert_TDRmat_recording_to_npz(f, output_folder=output_folder)
 
 
-def transfer_functions_from_recordings(
-    fp,
-    n_ls,
-    n_meas,
-    fformat="Recording-{}.mat",
-    n_avg=1,
-    ref_ch=0,
-    lowpass_lim=None,
-    lowpass_butt=None,
-    twindow=None,
-    take_T=None,
-    H_comp=None,
+def lanxi_reference_calibration_gain(
+    danterec, lanxirec, ref_ch_dante=None, ref_ch_lanxi=None, ls_ch=0, plot=False
 ):
-    """Calculate transfer-functions from a set of recordings inside a folder.
+    """Compute calibration gain for lanxi reference channel."""
+    with np.load(danterec) as data:
+        fs = int(data["fs"])
+        ref_ch_dante = data["ref_ch"] if ref_ch_dante is None else ref_ch_dante
+        recs_dante = data["recs"][ls_ch, ref_ch_dante, :]
 
-    Parameters
-    ----------
-    fp : str or Path
-        Path to folder.
-    n_ls : int
-        Number of serially measured channels.
-    n_meas : int
-        Total number of recordings
-    H_comp : None or ndarray, shape (n_ch - 1, nf), optional
-        If present, apply a compensation filter to each single recording.
-    fformat : str, optional
-        Recording file naming. Must include one '{}' to enumerate.
-    n_avg : int, optional
-        Number of averages.
-    ref_ch : int, optional
-        Index of reference channel
-    lowpass_lim : None or Tuple, optional
-        Tuple (fl, fu) that defines transition range of lowpass filter.
-    twindow : None or tuple
-        Specify time domain window.
-    take_T : float or None, optional
-        If float, only take the take_T first seconds of the impulse responses.
-        if twindiow==None: Hann window in last 5%.
+    with np.load(lanxirec) as data:
+        fs_lanxi = int(data["fs"])
+        ref_ch_lanxi = data["ref_ch"] if ref_ch_lanxi is None else ref_ch_lanxi
+        recs_lanxi = data["recs"][ls_ch, ref_ch_lanxi, :]
 
-    Returns
-    -------
-    ndarray,
-        Transfer-functions, shape (n_meas, n_ch - 1, n_ls, n_avg, n_tap // 2 + 1)
+    if fs_lanxi != fs:
+        recs_lanxi = (
+            Response.from_time(fs_lanxi, recs_lanxi)
+            .resample_poly(fs, normalize="same_amplitude")
+            .in_time
+        )
+        fs_lanxi = fs
 
-    """
-    fpath = Path(fp)
+    # flattop window the recording
+    window = flattop(len(recs_lanxi))
+    gain_window = window.mean()
+    rec_lanxi_win = recs_lanxi * window / gain_window
 
-    # read meta data from first recording
-    fname = fpath / fformat.format(1)
-    _, fs, n_ch, n_tap = load_bk_recording(fname, n_ls=n_ls, n_avg=n_avg, fullout=True)
+    window = flattop(len(recs_dante))
+    gain_window = window.mean()
+    rec_dante_win = recs_dante * window / gain_window
 
-    if take_T is not None:
-        # only take first take_T seconds of impulse responses
-        n_tap = int(np.ceil(take_T * fs))
-    else:
-        n_tap = int(n_tap / n_ls / n_avg)
+    A_dante = amplitude_spectrum(rec_dante_win)
+    A_lanxi = amplitude_spectrum(rec_lanxi_win)
 
-    shape_H = (n_meas, n_ch - 1, n_ls, n_avg, n_tap // 2 + 1)
-    H = np.zeros(shape_H, dtype=complex)
+    max_dante = np.abs(A_dante).max()
+    max_lanxi = np.abs(A_lanxi).max()
 
-    if H_comp is not None:
-        # cut H to same length in time domain
-        H_comp = Response.from_freq(int(fs), H_comp).ncshrink(n_tap * 1 / fs).in_freq
+    ref_cali_gain = max_dante / max_lanxi
 
-    for i in tqdm(np.arange(n_meas)):
-        fname = fpath / fformat.format(i + 1)
+    if plot:
+        t_dante = time_vector(len(recs_dante), fs)
+        t_lanxi = time_vector(len(recs_lanxi), fs_lanxi)
 
-        # load time domain recordings
-        temp, fs = load_bk_recording(fname, n_ls=n_ls, n_avg=n_avg)
-        temp = multi_transfer_function(temp, ref_ch=ref_ch, ret_time=True)
+        plt.figure()
+        plt.plot(t_dante, recs_dante)
+        plt.plot(t_lanxi, recs_lanxi * ref_cali_gain)
 
-        # exclude reference channel
-        temp = np.delete(temp, 0, axis=0)
+        f_dante = frequency_vector(len(recs_dante), fs)
+        f_lanxi = frequency_vector(len(recs_lanxi), fs_lanxi)
 
-        if take_T is not None:
-            # only take first take_T seconds
-            temp = temp[..., :n_tap]
-            if twindow is None:
-                # time window the tail
-                nwin = int(round(take_T * 0.05 * fs))
-                w = hann(2 * nwin)[nwin:]
-                temp[..., -nwin:] *= w
+        plt.figure()
+        plt.plot(f_dante, np.abs(A_dante))
+        plt.plot(f_lanxi, np.abs(A_lanxi * ref_cali_gain))
+        plt.xlim(995, 1005)
 
-        if H_comp is not None:
-            # convolve with compensation filter
-            Temp = np.fft.rfft(temp) * H_comp[:, None, None, :]
-            temp = np.fft.irfft(Temp, n=n_tap)
-            del Temp
-
-        if lowpass_lim is not None:
-            # filter out HF noise with zero phase frequency domain window
-            temp = lowpass_by_frequency_domain_window(fs, temp, *lowpass_lim)
-
-        if lowpass_butt is not None:
-            # filter HF noise with butterworth
-            order, cutoff = lowpass_butt
-            b, a = butter(order, cutoff / (fs / 2), "low")
-            temp = lfilter(b, a, temp, axis=-1)
-
-        if twindow is not None:
-            T = time_window(fs, n_tap, *twindow)
-            temp *= T
-
-        H[i] = np.fft.rfft(temp)
-
-    return H, fs, n_tap
+    return ref_cali_gain
