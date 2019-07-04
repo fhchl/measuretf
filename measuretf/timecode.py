@@ -195,13 +195,7 @@ def tc2tstamp(folder_name):
 
     timestamps = timestamps_from_irigb(irigb, fs)
 
-    # Save TC
-    min_time = timestamps[0][0]  # Start time of the files
-    max_time = timestamps[-1][0]  # End time of the files
-    timestamps_filename = (
-        min_time.isoformat() + "_" + max_time.isoformat() + "_timestamps"
-    )
-    timestamps_path = Path(folder_name, timestamps_filename)
+    timestamps_path = Path(folder_name, "timestamps")
     np.savez(timestamps_path, timestamps=timestamps, samplerate=fs)
     print(f"Time code saved at {timestamps_path}")
 
@@ -296,13 +290,12 @@ def sync_folder_to_timestamps(
 
     if out_folder is not None:
         out_folder = Path(out_folder)
-        if not out_folder.is_dir():
-            raise FileNotFoundError(out_folder)
+        out_folder.mkdir(exist_ok=True)
     else:
         out_folder = folder
 
     # load timestamps
-    timestamps_file = next(folder.glob("*_timestamps.npz"))
+    timestamps_file = next(folder.glob("timestamps.npz"))
     with np.load(timestamps_file, allow_pickle=True) as data:
         timestamps = data["timestamps"]
         samplerate = data["samplerate"]
@@ -312,9 +305,9 @@ def sync_folder_to_timestamps(
 
     print(f"Using {timestamps_file}")
 
-    # beginning and end of time code recording
-    start_time = datetime.fromisoformat(start_time).replace(tzinfo=tzinfo)
-    end_time = datetime.fromisoformat(end_time).replace(tzinfo=tzinfo)
+    # # beginning and end of time code recording
+    # start_time = datetime.fromisoformat(start_time).replace(tzinfo=tzinfo)
+    # end_time = datetime.fromisoformat(end_time).replace(tzinfo=tzinfo)
 
     rc_files = sorted(list(folder.glob("*rc.wav")))
 
