@@ -13,5 +13,6 @@ setup(
         "sounddevice",
         "response",
         "pysoundfile",
+        "joblib"
     ],
 )
