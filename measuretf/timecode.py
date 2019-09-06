@@ -8,17 +8,54 @@ Created on Thu Jun 20 23:18:41 2019
 import numpy as np
 import soundfile as sf
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from scipy import signal
 
-import matplotlib.pyplot as plt
 import warnings
 from joblib import Parallel, delayed
 
 from tqdm import tqdm
 
+# IRIG-B specs
+REFERENCE_WIDTH = 8
+ONES_WIDTH = 5
+ZEROS_WIDTH = 2
 
-def timestamps_from_irigb(irigb, fs):
+
+def continuous_to_binary_irigb(irigb, fs):
+    """Parse IRIG-B signal to binary format and find pulse widths."""
+    # remove DC
+    irigb = irigb - irigb.mean()
+
+    positive = irigb >= 0
+    irigb[positive] = 1
+    irigb[np.logical_not(positive)] = 0
+
+    # Compute pulse widths:
+    x_edge = np.diff(irigb)
+
+    # Indices of 1-seg start
+    idx_up = np.where(x_edge == 1)[0] + 1  # 1 less than the true value
+
+    # Indices of 0-seg start
+    idx_dn = np.where(x_edge == -1)[0] + 1  # 1 less than the true value
+
+    if idx_dn[0] < idx_up[0]:
+        idx_dn = idx_dn[1:]
+        if len(idx_dn) != len(idx_up):
+            idx_up = idx_up[0 : len(idx_dn)]
+    else:
+        if len(idx_dn) != len(idx_up):
+            idx_up = idx_up[:-1]
+
+    pulse_widths = np.round((idx_dn - idx_up) / fs * 1000).astype(
+        int
+    )  # Pulse width in ms
+
+    return pulse_widths, idx_up, idx_dn
+
+
+def timestamps_from_irigb(irigb, fs, max_interruption=300):
     """Find time stamps in irig-B signal.
 
     Parameters
@@ -34,109 +71,87 @@ def timestamps_from_irigb(irigb, fs):
         List of (timestamp, index) tuples.
 
     """
-    # preprocess: turn into binary signal
-    # TODO: remove low frequency components?
-    positive = irigb >= 0
-    irigb[positive] = 1
-    irigb[np.logical_not(positive)] = 0
+    pw, edge_up, _ = continuous_to_binary_irigb(irigb, fs)
 
-    # Compute pulse widths:
-    x_edge = np.diff(irigb)
-
-    # Indices of 1-seg start
-    edge_up = np.where(x_edge == 1)[0] + 1  # 1 less than the true value
-
-    # Indices of 0-seg start
-    edge_dn = np.where(x_edge == -1)[0] + 1  # 1 less than the true value
-
-    if edge_dn[0] < edge_up[0]:
-        edge_dn = edge_dn[1:]
-        if len(edge_dn) != len(edge_up):
-            edge_up = edge_up[0 : len(edge_dn)]
-    else:
-        if len(edge_dn) != len(edge_up):
-            edge_up = edge_up[:-1]
-
-    pls_wdt = np.round((edge_dn - edge_up) / fs * 1000).astype(int)  # Pulse width in ms
-
-    allowed_pulse_widths = reference_width, ones_width, zeros_width = (8, 5, 2)
-
-    pls_wdt_binary = pls_wdt.copy()
-    pls_wdt_binary[pls_wdt_binary == ones_width] = 1
-    pls_wdt_binary[pls_wdt_binary == zeros_width] = 0
+    # translate pulse width to binary switches
+    binary = pw.copy()
+    binary[binary == ONES_WIDTH] = 1
+    binary[binary == ZEROS_WIDTH] = 0
 
     # Decoding the Time Code (TC)
     timestamps = []  # list(array1, array2)...
 
-    for ii in range(0, len(pls_wdt) - 58):  # Consider "Incomplete last second"
-        if pls_wdt[ii] == reference_width and pls_wdt[ii + 1] == reference_width:
+    for ii in range(0, len(pw) - 58):  # Consider "Incomplete last second"
+        if pw[ii] == REFERENCE_WIDTH and pw[ii + 1] == REFERENCE_WIDTH:
             # start sequence detected
 
-            if not np.all(np.isin(pls_wdt[ii : ii + 60], allowed_pulse_widths)):
+            if not np.all(
+                np.isin(pw[ii : ii + 60], (REFERENCE_WIDTH, ONES_WIDTH, ZEROS_WIDTH))
+            ):
                 warnings.warn(
                     f"Could not decode timestamp at {ii / 100}s: invalid pulse widths"
                 )
-                # timestamps.append((None, edge_up[ii + 1]))
                 continue
             elif not np.all(
-                [pls_wdt[ii + i] == reference_width for i in [10, 20, 30, 40, 50, 60]]
+                [pw[ii + i] == REFERENCE_WIDTH for i in [10, 20, 30, 40, 50, 60]]
             ):
                 warnings.warn(
                     f"Could not decode timestamp at {ii / 100}s: marker bits not set correctly"
                 )
-                # timestamps.append((None, edge_up[ii + 1]))
                 continue
 
+            marked_sample = edge_up[ii + 1]  # timestamp marks this sample
+
             Second = (
-                1 * pls_wdt_binary[ii + 2]
-                + 2 * pls_wdt_binary[ii + 3]
-                + 4 * pls_wdt_binary[ii + 4]
-                + 8 * pls_wdt_binary[ii + 5]
-                + 10 * pls_wdt_binary[ii + 7]
-                + 20 * pls_wdt_binary[ii + 8]
-                + 40 * pls_wdt_binary[ii + 9]
+                1 * binary[ii + 2]
+                + 2 * binary[ii + 3]
+                + 4 * binary[ii + 4]
+                + 8 * binary[ii + 5]
+                + 10 * binary[ii + 7]
+                + 20 * binary[ii + 8]
+                + 40 * binary[ii + 9]
             )
             Minute = (
-                1 * pls_wdt_binary[ii + 11]
-                + 2 * pls_wdt_binary[ii + 12]
-                + 4 * pls_wdt_binary[ii + 13]
-                + 8 * pls_wdt_binary[ii + 14]
-                + 10 * pls_wdt_binary[ii + 16]
-                + 20 * pls_wdt_binary[ii + 17]
-                + 40 * pls_wdt_binary[ii + 18]
+                1 * binary[ii + 11]
+                + 2 * binary[ii + 12]
+                + 4 * binary[ii + 13]
+                + 8 * binary[ii + 14]
+                + 10 * binary[ii + 16]
+                + 20 * binary[ii + 17]
+                + 40 * binary[ii + 18]
             )
             # Hours can differ by device setting. UTC is default
             Hour = (
-                1 * pls_wdt_binary[ii + 21]
-                + 2 * pls_wdt_binary[ii + 22]
-                + 4 * pls_wdt_binary[ii + 23]
-                + 8 * pls_wdt_binary[ii + 24]
-                + 10 * pls_wdt_binary[ii + 26]
-                + 20 * pls_wdt_binary[ii + 27]
+                1 * binary[ii + 21]
+                + 2 * binary[ii + 22]
+                + 4 * binary[ii + 23]
+                + 8 * binary[ii + 24]
+                + 10 * binary[ii + 26]
+                + 20 * binary[ii + 27]
             )
             # Day: nth day in this year
             Day = (
-                1 * pls_wdt_binary[ii + 31]
-                + 2 * pls_wdt_binary[ii + 32]
-                + 4 * pls_wdt_binary[ii + 33]
-                + 8 * pls_wdt_binary[ii + 34]
-                + 10 * pls_wdt_binary[ii + 36]
-                + 20 * pls_wdt_binary[ii + 37]
-                + 40 * pls_wdt_binary[ii + 38]
-                + 80 * pls_wdt_binary[ii + 39]
-                + 100 * pls_wdt_binary[ii + 41]
-                + 200 * pls_wdt_binary[ii + 42]
+                1 * binary[ii + 31]
+                + 2 * binary[ii + 32]
+                + 4 * binary[ii + 33]
+                + 8 * binary[ii + 34]
+                + 10 * binary[ii + 36]
+                + 20 * binary[ii + 37]
+                + 40 * binary[ii + 38]
+                + 80 * binary[ii + 39]
+                + 100 * binary[ii + 41]
+                + 200 * binary[ii + 42]
             )
             # Year: nth year from 2000
             Year = 2000 + (
-                1 * pls_wdt_binary[ii + 51]
-                + 2 * pls_wdt_binary[ii + 52]
-                + 4 * pls_wdt_binary[ii + 53]
-                + 8 * pls_wdt_binary[ii + 54]
-                + 10 * pls_wdt_binary[ii + 56]
-                + 20 * pls_wdt_binary[ii + 57]
-                + 40 * pls_wdt_binary[ii + 58]
-                + 80 * pls_wdt_binary[ii + 59]
+                1 * binary[ii + 51]
+                + 2 * binary[ii + 52]
+                + 4 * binary[ii + 53]
+                + 8 * binary[ii + 54]
+                + 10 * binary[ii + 56]
+                + 20 * binary[ii + 57]
+                + 40 * binary[ii + 58]
+                + 80 * binary[ii + 59]
             )
 
             # LeapYear?
@@ -164,7 +179,17 @@ def timestamps_from_irigb(irigb, fs):
                     break
 
             dt = datetime(Year, Month, Date, Hour, Minute, Second, tzinfo=timezone.utc)
-            timestamps.append((dt, edge_up[ii + 1]))
+
+            # ignore timestamp if time to last timestamp is more than max_interruption
+            if len(timestamps) > 0:
+                last_dt = timestamps[-1][0]
+                if dt <= last_dt or dt - last_dt > timedelta(seconds=max_interruption):
+                    warnings.warn(
+                        f"""Could not decode timestamp at {ii / 100}s: interruption larger than `max_interruption={max_interruption}`"""
+                    )
+                    continue
+
+            timestamps.append((dt, marked_sample))
 
     return timestamps
 
@@ -268,7 +293,7 @@ def sync_folder_to_timestamps(
     resamplerate=48000,
     tzinfo=timezone.utc,
     out_folder=None,
-    n_jobs=1
+    n_jobs=1,
 ):
     """Read multiple wav recordings *rc.wav from the given folder,
     Slice files for given interval (in time).
