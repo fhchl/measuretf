@@ -33,28 +33,37 @@ def load_recording(fname, n_out=1, n_avg=1):
     """
     fname = Path(fname)
 
-    if fname.suffix == 'npz':
-        with np.load(fname) as data:
+    if fname.suffix == '.npz':
+        with np.load(fname, allow_pickle=True) as data:
             fs = data["fs"]
             orecs = data["recs"]  # has shape n_in x n_tap
     else:
-        orecs, fs = sf.read(fname)
+        orecs, fs = sf.read(str(fname))  # sf.read needs str
 
-    n_in, n_otap = orecs.shape
+    if orecs.ndim == 1:
+        orecs = orecs[None]
 
-    n_tap = n_otap / n_out / n_avg
-    if n_tap.is_integer():
-        n_tap = int(n_tap)
-    else:
-        raise ValueError("Can't split recording: n_tap is not an integer")
+    if orecs.ndim == 2:
+        # cut
+        n_in, n_otap = orecs.shape
+        n_tap = n_otap / n_out / n_avg
+        if n_tap.is_integer():
+            n_tap = int(n_tap)
+        else:
+            raise ValueError("Can't split recording: n_tap is not an integer")
 
-    recs = np.zeros((n_in, n_out, n_avg, n_tap))
-    for i in range(n_in):
-        # shape  (ntaps*n_avg*n_out, ) -> (n_out, ntaps*n_avg)
-        temp = np.array(np.split(orecs[i], n_out))
-        temp = np.array(np.split(temp, n_avg, axis=-1))  # (n_avg, n_out, n_taps)
-        temp = np.moveaxis(temp, 0, 1)  # (n_out, n_avg, n_taps)
-        recs[i] = temp
+        recs = np.zeros((n_in, n_out, n_avg, n_tap))
+        for i in range(n_in):
+            # shape  (ntaps*n_avg*n_out, ) -> (n_out, ntaps*n_avg)
+            temp = np.array(np.split(orecs[i], n_out))
+            temp = np.array(np.split(temp, n_avg, axis=-1))  # (n_avg, n_out, n_taps)
+            temp = np.moveaxis(temp, 0, 1)  # (n_out, n_avg, n_taps)
+            recs[i] = temp
+
+    elif orecs.ndim == 3:
+        recs = orecs[None]
+    elif orecs.ndim == 4:
+        recs = orecs
 
     return recs, fs
 

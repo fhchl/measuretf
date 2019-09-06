@@ -470,30 +470,43 @@ def cut_recording(
     fname, cuts, names=None, remove_orig=False, outfolder=None, shift_before_cut=0
 ):
     """Cut recordings at samples."""
-    data = np.load(fname)
-    recs = data["recs"]
-    if shift_before_cut:
-        recs = np.roll(recs, shift_before_cut, axis=-1)
-    recs = np.split(recs, cuts, axis=-1)
-    sounds = np.split(data["sound"].T, cuts, axis=-1)
-    path = Path(fname)
+    with np.load(fname, allow_pickle=True) as data:
+        recs = data["recs"]
 
-    for i, rs in enumerate(zip(recs, sounds)):
-        r, s = rs
-        add = "-{}".format(names[i] if names is not None else i)
-        parent = Path(outfolder) if outfolder is not None else path.parent
-        newpath = parent / (path.stem + add)
-        np.savez(
-            newpath,
-            recs=r,
-            fs=data["fs"],
-            n_ch=r.shape[0],
-            n_tap=r.shape[1],
-            sound=s,
-            ref_ch=data["ref_ch"],
-        )
+        if shift_before_cut:
+            recs = np.roll(recs, shift_before_cut, axis=-1)
 
-    data.close()
+        # split
+        recs = np.split(recs, cuts, axis=-1)
+        sounds = np.split(data["sound"].T, cuts, axis=-1)
+
+        # split also the times
+        datetime_start = data["datetime_start"]
+        datetime_end = data["datetime_end"]
+        duration = (datetime_end - datetime_start) / cuts
+
+        path = Path(fname)
+        for i, rs in enumerate(zip(recs, sounds)):
+
+            add = "-{}".format(names[i] if names is not None else i)
+            parent = Path(outfolder) if outfolder is not None else path.parent
+            newpath = parent / (path.stem + add)
+
+            split_start = datetime_start + i * duration
+            split_end = datetime_start + (i + 1) * duration
+
+            r, s = rs
+            np.savez(
+                newpath,
+                recs=r,
+                fs=data["fs"],
+                n_ch=r.shape[0],
+                n_tap=r.shape[1],
+                sound=s,
+                ref_ch=data["ref_ch"],
+                datetime_start=split_start,
+                datetime_end=split_end,
+            )
 
     if remove_orig:
         # remove original files
@@ -967,16 +980,26 @@ def tf_and_post_from_saved_rec(
     calibration_gain=None,
     fftwindow=None,
     reg_lim_dB=None,
+    average=False,
+    return_time=False,
 ):
-    with np.load(fname) as data:
+    with np.load(fname, allow_pickle=True) as data:
         recs = data["recs"]  # shape (n_out, n_in, navg, nt)
         fs = int(data["fs"])
         sound = data["sound"]
         ref_ch = data["ref_ch"]
+        start = np.datetime64(data["datetime_start"].item())
+        end = data["datetime_end"]
+
+    start = np.datetime64(start.item())
+    end = np.datetime64(end.item())
 
     # accept legancy format without reps (n_out, n_in, nt)
     if recs.ndim == 3:
         recs = recs[:, :, None, :]
+
+    if average:
+        recs = recs.mean(axis=2)[:, :, None, :]
 
     if calibration_gain is not None:
         recs = recs * np.asarray(calibration_gain)[None, :, None, None]
@@ -1024,6 +1047,21 @@ def tf_and_post_from_saved_rec(
 
         if plot:
             Response.from_time(fs, irs).plot(figsize=(10, 10))
+
+    if return_time:
+        n_out, _, n_avg, _ = recs.shape
+        timespan = end - start
+        time_per_out = timespan / n_out
+        time_per_avg = time_per_out / n_avg
+
+        time = np.zeros((n_out, n_avg), dtype="datetime64[us]")
+        for i in range(n_out):
+            timeout = start + i * time_per_out
+            for j in range(n_avg):
+                time[i, j] = timeout + (j + 0.5) * time_per_avg
+
+        return fs, irs, time
+
     return fs, irs
 
 
