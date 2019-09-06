@@ -198,7 +198,16 @@ def transfer_function_with_reference(
     return tfs
 
 
-def transfer_function_csd(x, y, fs, compensate_delay=True, fwindow=None, **kwargs):
+def transfer_function_csd(
+    x,
+    y,
+    fs,
+    compensate_delay=True,
+    compensate_range=None,
+    reg=0,
+    return_dt=False,
+    **kwargs,
+):
     """Compute transfer-function between time domain signals using Welch's method.
 
     Delay compensation mentioned e.g. in S. Muller, A. E. S. Member, and P. Massarani,
@@ -213,8 +222,6 @@ def transfer_function_csd(x, y, fs, compensate_delay=True, fwindow=None, **kwarg
         Sampling frequency
     compensate_delay: optional, bool
         Compensate for delays in correlation estimations.
-    fwindow: optional, tuple
-        Frequency limits of frequency domain window to be applied after TF estimation.
     **kwargs
         Kwargs are fed to csd and welch functions.
 
@@ -231,24 +238,20 @@ def transfer_function_csd(x, y, fs, compensate_delay=True, fwindow=None, **kwarg
     assert y.ndim == 1
     assert x.size == y.size
 
-    if compensate_delay:
-        x, y, dt = time_align(x, y, fs)
+    if compensate_delay is not None:
+        x, y, dt = time_align(x, y, fs, trange=compensate_range)
 
     f, S_xy = csd(x, y, fs=fs, **kwargs)
     _, S_xx = welch(x, fs=fs, **kwargs)
 
-    H = S_xy / S_xx
+    H = S_xy / (S_xx + reg)
 
     if compensate_delay:
         # reintroduce delay
         H *= np.exp(-1j * 2 * np.pi * f * dt)
 
-    if fwindow is not None:
-        startwindow, stopwindow = fwindow
-        fs_new = 2 * int(f[-1])
-        n_new = (H.shape[-1] - 1) * 2
-        W = freq_window(fs_new, n_new, startwindow, stopwindow)
-        H *= W
+    if return_dt:
+        return f, H, dt
 
     return f, H
 
