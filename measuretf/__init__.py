@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 from response import Response
-from scipy.signal import tukey, csd, welch, butter, hann, lfilter
+from scipy.signal import tukey, csd, welch, butter, hann, lfilter, coherence
 
 from measuretf.utils import time_align
 from measuretf.filtering import (
@@ -365,7 +365,7 @@ def transfer_functions_from_recordings(
 
 
 def coherence_csd(x, y, fs, compensate_delay=True, **csd_kwargs):
-    """Compute maginitude squared coherence of two signals using Welch's method.
+    """Estimate maginitude squared coherence of two signals using Welch's method.
 
     Parameters
     ----------
@@ -382,7 +382,7 @@ def coherence_csd(x, y, fs, compensate_delay=True, **csd_kwargs):
     -------
     f : ndarray
         Array of sample frequencies.
-    gamma2 : ndarray
+    Cxy : ndarray
         Magnitude squared coherence
 
     """
@@ -393,13 +393,43 @@ def coherence_csd(x, y, fs, compensate_delay=True, **csd_kwargs):
     if compensate_delay:
         x, y, _ = time_align(x, y, fs)
 
-    f, S_xy = csd(x, y, fs=fs, **csd_kwargs)
-    _, S_xx = welch(x, fs=fs, **csd_kwargs)
-    _, S_yy = welch(y, fs=fs, **csd_kwargs)
+    f, Cxy = coherence(x, y, fs=fs, **csd_kwargs)
 
-    gamma2 = np.abs(S_xy) ** 2 / S_xx / S_yy
+    return f, Cxy
 
-    return f, gamma2
+
+def coherence_matrix(x, fs=1, nperseg=256, compensate_delay=True, **csd_kwargs):
+    """Estimate coherence matrix between series.
+
+    Parameters
+    ----------
+    x : array_like
+        A 2-D array containing multiple variables and observations. Each row of x
+        represents a variable, and each column a single observation of all those
+        variables.
+    fs : float
+        Samplerate
+    compensate_delay : bool, optional
+        If `True`, time align variables before cross-correlation.
+    **csd_kwargs
+        Kwargs passed to `sipy.signal.coherence`.
+
+    """
+    x = np.atleast_2d(x)
+    C = np.ones((x.shape[0], x.shape[0], nperseg // 2 + 1))
+    for i in range(x.shape[0]):
+        for j in range(i, x.shape[0]):
+            f, Cij = coherence_csd(
+                x[i],
+                x[j],
+                fs=fs,
+                compensate_delay=compensate_delay,
+                nperseg=nperseg,
+                **csd_kwargs,
+            )
+            C[i, j] = C[j, i] = Cij
+
+    return f, C
 
 
 def coherence_from_averages(x, y, n="pow2", avgaxis=-2, axis=-1, reg=0):
