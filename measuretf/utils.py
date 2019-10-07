@@ -35,21 +35,26 @@ def find_nearest(array, value):
     return array[idx], idx
 
 
-def time_align(x, y, fs):
+def time_align(x, y, fs, trange=None):
     """Time align two signals, zeropad as necessary.
 
     If `dt` is positive `x` was delayed and `y` zeropadded for same length.
     """
     n = x.size
 
-    # delta time array to match xcorr
-    s = np.arange(1 - n, n)
-
     # cross correlation
     xcorr = correlate(y, x, mode="full")
 
+    # delta time array to match xcorr
+    t = np.arange(1 - n, n) / fs
+
+    if trange is not None:
+        idx = np.logical_and(trange[0] <= t, t <= trange[1])
+        t = t[idx]
+        xcorr = xcorr[idx]
+
     # estimate delay in time
-    dt = s[xcorr.argmax()] / fs
+    dt = t[xcorr.argmax()]
 
     # match both responses in time and length
     if dt >= 0:
