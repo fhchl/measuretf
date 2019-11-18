@@ -1,12 +1,10 @@
 """Utility functions."""
 
-import numpy as np
 import matplotlib.pyplot as plt
-
-from scipy.signal import correlate
-from response import Response
-
+import numpy as np
 from measuretf.fft import time_vector
+from response import Response
+from scipy.signal import correlate
 
 
 def is_ipynb():
@@ -61,8 +59,8 @@ def time_align(x, y, fs, trange=None):
         x = Response.from_time(fs, x).delay(dt, keep_length=False).in_time
         y = Response.from_time(fs, y).zeropad_to_length(x.size).in_time
     else:
-        x = Response.from_time(fs, x).zeropad_to_length(y.size).in_time
         y = Response.from_time(fs, y).delay(-dt, keep_length=False).in_time
+        x = Response.from_time(fs, x).zeropad_to_length(y.size).in_time
 
     return x, y, dt
 
@@ -122,3 +120,81 @@ def load_rec(fname, plot=True, **plot_kwargs):
     if plot:
         plot_rec(fs, recs, **plot_kwargs)
     return recs, fs, ref_ch
+
+
+def window_nd(a, window, steps=None, axis=None):
+    """
+    Create a windowed view over `n`-dimensional input that uses an
+    `m`-dimensional window, with `m <= n`
+
+    Parameters
+    -------------
+    a : Array-like
+        The array to create the view on
+    window : tuple or int
+        If int, the size of the window in `axis`, or in all dimensions if
+        `axis == None`
+
+        If tuple, the shape of the desired window.  `window.size` must be:
+            equal to `len(axis)` if `axis != None`, else
+            equal to `len(a.shape)`, or
+            1
+    steps : tuple, int or None
+        The offset between consecutive windows in desired dimension
+        If None, offset is one in all dimensions
+        If int, the offset for all windows over `axis`
+        If tuple, the steps along each `axis`.
+            `len(steps)` must me equal to `len(axis)`
+    axis : tuple, int or None
+        The axes over which to apply the window
+        If None, apply over all dimensions
+        if tuple or int, the dimensions over which to apply the window
+
+    Returns
+    -------
+    a_view : ndarray
+        A windowed view on the input array `a`, or copied list of windows
+
+    Notes
+    -----
+    Source: https://stackoverflow.com/questions/45960192/using-numpy-as-strided-function-to-create-patches-tiles-rolling-or-sliding-w
+
+    """
+    ashp = np.array(a.shape)
+
+    if axis != None:
+        axs = np.array(axis, ndmin=1)
+        axs[axs < 0] = a.ndim + axs[axs < 0]  # convert negative axes to positive axes
+        assert np.all(np.in1d(axs, np.arange(ashp.size))), "Axes out of range"
+    else:
+        axs = np.arange(ashp.size)
+
+    window = np.array(window, ndmin=1)
+    assert (window.size == axs.size) | (window.size == 1), "Window dims and axes don't match"
+    wshp = ashp.copy()
+    wshp[axs] = window
+    assert np.all(wshp <= ashp), "Window is bigger than input array in axes"
+
+    stp = np.ones_like(ashp)
+    if steps:
+        steps = np.array(steps, ndmin=1)
+        assert np.all(steps > 0), "Only positive steps allowed"
+        assert (steps.size == axs.size) | (steps.size == 1), "Steps and axes don't match"
+        stp[axs] = steps
+
+    astr = np.array(a.strides)
+
+    shape = tuple((ashp - wshp) // stp + 1) + tuple(wshp)
+    strides = tuple(astr * stp) + tuple(astr)
+
+    as_strided = np.lib.stride_tricks.as_strided
+    a_view = np.squeeze(as_strided(a, shape=shape, strides=strides))
+    return a_view
+
+
+def covariance(X, Y, axis=0, ddof=0):
+    """Compute sample covariance."""
+    mu_X = X.mean(axis=axis)
+    mu_Y = X.mean(axis=axis)
+    cov = 1 / (X.shape[axis] - ddof) * np.sum((X - mu_X) * (Y - mu_Y).conj(), axis=axis)
+    return cov

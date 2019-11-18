@@ -5,18 +5,15 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import scipy.signal as sig
 import sounddevice as sd
-from response import Response
-from scipy.signal import tukey, csd, welch, butter, hann, lfilter, coherence
-
-from measuretf.utils import time_align
-from measuretf.filtering import (
-    freq_window,
-    time_window,
-    lowpass_by_frequency_domain_window,
-)
+from measuretf.filtering import (freq_window,
+                                 lowpass_by_frequency_domain_window,
+                                 time_window)
 from measuretf.io import load_recording
-from measuretf.utils import tqdm
+from measuretf.utils import covariance, time_align, tqdm, window_nd
+from response import Response
+from sklearn.utils import resample
 
 
 def transfer_function(
@@ -63,7 +60,7 @@ def transfer_function(
     # NOTE: is this used anywhere? If not remove
     if fftwindow:
         print("fftwindowing!")
-        w = tukey(ref.shape[axis], alpha=0.1)
+        w = sig.tukey(ref.shape[axis], alpha=0.1)
         meas = np.moveaxis(meas, axis, -1)
         meas = meas * w
         meas = np.moveaxis(meas, -1, axis)
@@ -241,8 +238,8 @@ def transfer_function_csd(
     if compensate_delay is not None:
         x, y, dt = time_align(x, y, fs, trange=compensate_range)
 
-    f, S_xy = csd(x, y, fs=fs, **kwargs)
-    _, S_xx = welch(x, fs=fs, **kwargs)
+    f, S_xy = sig.csd(x, y, fs=fs, **kwargs)
+    _, S_xx = sig.welch(x, fs=fs, **kwargs)
 
     H = S_xy / (S_xx + reg)
 
@@ -254,6 +251,127 @@ def transfer_function_csd(
         return f, H, dt
 
     return f, H
+
+
+def periodograms(
+    x,
+    y,
+    fs=1.0,
+    window="hann",
+    nperseg=256,
+    noverlap=None,
+    nfft=None,
+    return_onesided=True,
+    axis=-1,
+):
+    """Compute periodograms."""
+    if noverlap is None:
+        noverlap = nperseg // 2
+    if nfft is None:
+        nfft = nperseg
+
+    res = np.stack((x, y), axis=0)
+    res = np.moveaxis(res, axis, -1)
+
+    # create overlapping segments
+    res = window_nd(res, window=nperseg, steps=nperseg - noverlap, axis=-1).copy()
+
+    # remove mean
+    res -= res.mean(axis=-1, keepdims=True)
+
+    # window each segment
+    win = sig.get_window(window, Nx=nperseg)
+    res *= win
+
+    # FFT
+    fft_func = np.fft.rfft if return_onesided else np.fft.fft
+    res = fft_func(res, axis=-1, n=nfft)
+
+    # modified periodograms
+    res = (res[:, 0].conj() * res[:, 1]) / np.sum(win ** 2)
+
+    # take energy at positive and negative frequencies
+    if return_onesided:
+        if nperseg % 2 == 0:
+            res[..., 1:-1] *= 2
+        else:
+            res[..., 1:] *= 2
+        f = np.arange(nfft // 2 + 1) / nfft * fs
+    else:
+        f = np.arange(nfft) / nfft * fs
+
+    res = np.moveaxis(res, -1, axis)
+
+    return f, res
+
+
+def estimate_transfer_function_and_variance(
+    x,
+    y,
+    fs=1.0,
+    window="hann",
+    bootstraps=100,
+    reg_lim_dB=None,
+    axis=-1,
+    **periodogram_kw,
+):
+    """Estimate transfer function and the variance of the estimate."""
+    x, y, dt = time_align(x, y, fs)
+
+    f, per_xy = periodograms(x, y, fs=fs, **periodogram_kw)
+    f, per_xx = periodograms(x, x, fs=fs, **periodogram_kw)
+
+    # undo time alignment
+    per_xy *= np.exp(-1j * 2 * np.pi * f * dt)
+
+    sample_mean_xy = per_xy.mean(axis=0)
+    sample_error_xy = np.std(per_xy, axis=0) ** 2 / per_xy.shape[0]
+
+    sample_mean_xx = per_xx.mean(axis=0)
+    sample_error_xx = np.std(per_xx, axis=0) ** 2 / per_xx.shape[0]
+
+    # regularize
+    if reg_lim_dB is not None:
+        # maximum of reference
+        maxSxxdB = np.max(10 * np.log10(sample_mean_xx + 1e-8), axis=0)
+
+        # power in reference should be at least
+        minSxxdB = maxSxxdB - reg_lim_dB
+
+        # 10 * log10(reg + S_xx) = minRdB
+        reg = 10 ** (minSxxdB / 10) - sample_mean_xx
+        reg[reg < 0] = 0
+    else:
+        reg = 1e-8
+
+    sample_mean_xx += reg
+    per_xx += reg
+
+    H_est = sample_mean_xy / sample_mean_xx
+
+    # bootstrap
+    sample_means_xy = np.zeros((bootstraps, per_xy.shape[1]), dtype=complex)
+    sample_means_xx = np.zeros((bootstraps, per_xx.shape[1]), dtype=complex)
+
+    for i in range(bootstraps):
+        # same resamples
+        res = resample(np.stack((per_xy, per_xx), axis=-1)).mean(axis=0)
+        sample_means_xy[i] = res[..., 0]
+        sample_means_xx[i] = res[..., 1]
+
+    cov_means = covariance(sample_means_xy, sample_means_xx, ddof=1)
+
+    var_H_est = (
+        np.abs(sample_mean_xy) ** 2
+        / np.abs(sample_mean_xx) ** 2
+        * (
+            sample_error_xy / np.abs(sample_mean_xy) ** 2
+            + sample_error_xx / np.abs(sample_mean_xx) ** 2
+            - 2 * np.real(cov_means.conj() / sample_mean_xx / sample_mean_xy.conj())
+        )
+    )
+
+    return f, H_est, var_H_est
 
 
 def transfer_functions_from_recordings(
@@ -336,7 +454,7 @@ def transfer_functions_from_recordings(
             if twindow is None:
                 # time window the tail
                 nwin = int(round(take_T * 0.05 * fs))
-                w = hann(2 * nwin)[nwin:]
+                w = sig.hann(2 * nwin)[nwin:]
                 temp[..., -nwin:] *= w
 
         if H_comp is not None:
@@ -352,8 +470,8 @@ def transfer_functions_from_recordings(
         if lowpass_butt is not None:
             # filter HF noise with butterworth
             order, cutoff = lowpass_butt
-            b, a = butter(order, cutoff / (fs / 2), "low")
-            temp = lfilter(b, a, temp, axis=-1)
+            b, a = sig.butter(order, cutoff / (fs / 2), "low")
+            temp = sig.lfilter(b, a, temp, axis=-1)
 
         if twindow is not None:
             T = time_window(fs, n_tap, *twindow)
@@ -393,7 +511,7 @@ def coherence_csd(x, y, fs, compensate_delay=True, **csd_kwargs):
     if compensate_delay:
         x, y, _ = time_align(x, y, fs)
 
-    f, Cxy = coherence(x, y, fs=fs, **csd_kwargs)
+    f, Cxy = sig.coherence(x, y, fs=fs, **csd_kwargs)
 
     return f, Cxy
 
