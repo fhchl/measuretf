@@ -1,10 +1,12 @@
 """Filtering and windowing."""
 
-import numpy as np
 import matplotlib.pyplot as plt
-from scipy.signal import hann, get_window, convolve
+import numpy as np
+from adafilt.utils import olafilt
 from measuretf.fft import frequency_vector, time_vector
 from measuretf.utils import find_nearest
+from response import Response
+from scipy.signal import convolve, get_window, hann, resample_poly
 
 
 def lowpass_by_frequency_domain_window(fs, x, fstart, fstop, axis=-1):
@@ -145,5 +147,89 @@ def mutliconvolve(sound, h, plot=False):
         for i, ax in enumerate(axes):
             ax.plot(convsound[:, i])
             ax.set_ylim((-1, 1))
+
+    return convsound
+
+
+def filter_sound(
+    fs_soundcard,
+    h,
+    fs_filter,
+    sound,
+    fs_sound,
+    npri,
+    plot=False,
+    normalize=True,
+    include_reference=False,
+):
+    """Convolve filter and sound with approriate resampling.
+
+    Parameters
+    ----------
+    fs_soundcard : TYPE
+        Description
+    h : ndarray
+        Control filters (no primary filters!)
+    fs : int
+        samplerate
+    sound : ndarray
+        sound file
+    fs_sound : TYPE
+        sample rate sound file
+    npri : TYPE
+        Add this many allpassed sounds to the top of the convsound
+
+    """
+    if fs_sound != fs_soundcard:
+        up, down = (fs_soundcard / fs_sound).as_integer_ratio()
+        print("Resampling sound with {}/{}".format(up, down))
+        sound = resample_poly(sound, up, down)
+        print("Done.")
+
+    if fs_filter != fs_soundcard:
+        up, down = (fs_soundcard / fs_filter).as_integer_ratio()
+        print("Resampling filter with {}/{}".format(up, down))
+
+        if plot:
+            Response.from_time(fs_filter, h.T).plot(
+                figsize=(10, 8), dblim=(-35, 2), flim=(10, fs_soundcard / 2)
+            )
+
+        h = resample_poly(h, up, down) * down / up
+
+        if plot:
+            Response.from_time(fs_soundcard, h.T).plot(
+                figsize=(10, 8), dblim=(-35, 2), flim=(10, fs_soundcard / 2)
+            )
+
+        print("Done.")
+
+    # add allpass diracs for primary sources
+    h_pri = np.zeros((h.shape[0], npri))
+    h_pri[0, :] = 1
+    h = np.concatenate((h_pri, h), axis=1)
+
+    # convolve sounds
+    convsound = np.zeros((sound.shape[0], h.shape[1]))
+    for i in range(h.shape[1]):
+        convsound[:, i] = olafilt(h[:, i], sound)
+
+    if include_reference == True:
+        convsound = np.concatenate((convsound, sound[:, None]), axis=1)
+    elif isinstance(include_reference, int):
+        for i in range(include_reference):
+            convsound = np.concatenate((convsound, sound[:, None]), axis=1)
+
+
+    if normalize:
+        maxamp = np.max(np.abs(convsound))
+        convsound /= (maxamp * 1.05)
+
+    if plot:
+        fig, axes = plt.subplots(nrows=convsound.shape[1], figsize=(20, 30))
+        t = np.arange(convsound.shape[0])[::10]/fs_soundcard
+        for i, ax in enumerate(axes):
+            ax.plot(t, convsound[::10, i])
+            ax.set_ylim(-1, 1)
 
     return convsound
