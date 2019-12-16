@@ -1,16 +1,15 @@
 """Load data from mat or npz recording files."""
 
-import numpy as np
-import matplotlib.pyplot as plt
-import soundfile as sf
-
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
+import matplotlib.pyplot as plt
+import numpy as np
+import soundfile as sf
 from measuretf.utils import plot_rec
 
 
-def load_recording(fname, n_out=1, n_avg=1):
+def load_recording(fname, n_out=1, n_avg=1, cut=True):
     """Load recording and split according to number of sources and averages.
 
     Parameters
@@ -44,26 +43,30 @@ def load_recording(fname, n_out=1, n_avg=1):
         orecs = orecs[None]
 
     if orecs.ndim == 2:
-        # cut
-        n_in, n_otap = orecs.shape
-        n_tap = n_otap / n_out / n_avg
-        if n_tap.is_integer():
-            n_tap = int(n_tap)
-        else:
-            raise ValueError("Can't split recording: n_tap is not an integer")
+        if cut:
+            n_in, n_otap = orecs.shape
+            n_tap = n_otap / n_out / n_avg
+            if n_tap.is_integer():
+                n_tap = int(n_tap)
+            else:
+                raise ValueError("Can't split recording: n_tap is not an integer")
 
-        recs = np.zeros((n_in, n_out, n_avg, n_tap))
-        for i in range(n_in):
-            # shape  (ntaps*n_avg*n_out, ) -> (n_out, ntaps*n_avg)
-            temp = np.array(np.split(orecs[i], n_out))
-            temp = np.array(np.split(temp, n_avg, axis=-1))  # (n_avg, n_out, n_taps)
-            temp = np.moveaxis(temp, 0, 1)  # (n_out, n_avg, n_taps)
-            recs[i] = temp
+            recs = np.zeros((n_in, n_out, n_avg, n_tap))
+            for i in range(n_in):
+                # shape  (ntaps*n_avg*n_out, ) -> (n_out, ntaps*n_avg)
+                temp = np.array(np.split(orecs[i], n_out))
+                temp = np.array(np.split(temp, n_avg, axis=-1))  # (n_avg, n_out, n_taps)
+                temp = np.moveaxis(temp, 0, 1)  # (n_out, n_avg, n_taps)
+                recs[i] = temp
+        else:
+            recs = orecs[..., 0][None, None, None, :]
 
     elif orecs.ndim == 3:
         recs = orecs[None]
     elif orecs.ndim == 4:
         recs = orecs
+    else:
+        raise ValueError(f"orces.ndim == {orecs.ndim}!")
 
     return recs, fs
 

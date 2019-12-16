@@ -1,12 +1,13 @@
 """Calibration tools."""
 
-import numpy as np
-import matplotlib.pyplot as plt
-import sounddevice as sd
 from datetime import datetime
-from scipy.signal import flattop
-from measuretf.fft import amplitude_spectrum, time_vector, frequency_vector
+
+import matplotlib.pyplot as plt
+import numpy as np
+import sounddevice as sd
+from measuretf.fft import amplitude_spectrum, frequency_vector, time_vector
 from measuretf.io import load_recording
+from scipy.signal import flattop
 
 
 def record_calibration(
@@ -21,8 +22,6 @@ def record_calibration(
         device=device,
     )
 
-    rec = rec[None, None, None, :]
-
     np.savez(
         name + " - mic_channel {}".format(mic_channel),
         recs=rec,
@@ -34,14 +33,15 @@ def record_calibration(
     if plot:
         plt.figure()
         t = time_vector(T_rec * fs_soundcard, fs_soundcard)
-        plt.plot(t, rec[0, 0, :])
+        plt.plot(t, rec)
 
     return rec
 
 
 def calibration_gain_from_recording(fname, mic_channel=0, L_calib=94, plot=False):
-    rec, fs = load_recording(fname)
-    rec = rec[mic_channel, 0, 0]
+    with np.load(fname, allow_pickle=True) as data:
+        fs = data["fs"]
+        rec = data["recs"][:, 0]  # has shape n_in x n_tap
 
     # flattop window the recording
     window = flattop(len(rec))
