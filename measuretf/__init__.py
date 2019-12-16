@@ -312,7 +312,7 @@ def estimate_transfer_function_and_variance(
     window="hann",
     bootstraps=100,
     reg_lim_dB=None,
-    axis=-1,
+    min_x_rms=None,
     **periodogram_kw,
 ):
     """Estimate transfer function and the variance of the estimate."""
@@ -323,6 +323,15 @@ def estimate_transfer_function_and_variance(
 
     # undo time alignment
     per_xy *= np.exp(-1j * 2 * np.pi * f * dt)
+
+    if min_x_rms is not None:
+        keep_indx = np.sqrt(per_xx.mean(axis=1)) > min_x_rms
+        warnings.warn(
+            f"Removing {per_xx.shape[0] - keep_indx.sum()} of {per_xx.shape[0]}"
+            + " segments due to too low RMS."
+        )
+        per_xy = per_xy[keep_indx]
+        per_xx = per_xx[keep_indx]
 
     sample_mean_xy = per_xy.mean(axis=0)
     sample_error_xy = np.std(per_xy, axis=0) ** 2 / per_xy.shape[0]
@@ -349,12 +358,11 @@ def estimate_transfer_function_and_variance(
 
     H_est = sample_mean_xy / sample_mean_xx
 
-    # bootstrap
+    # bootstrap for covairance estimate
     sample_means_xy = np.zeros((bootstraps, per_xy.shape[1]), dtype=complex)
     sample_means_xx = np.zeros((bootstraps, per_xx.shape[1]), dtype=complex)
 
     for i in range(bootstraps):
-        # same resamples
         res = resample(np.stack((per_xy, per_xx), axis=-1)).mean(axis=0)
         sample_means_xy[i] = res[..., 0]
         sample_means_xx[i] = res[..., 1]
@@ -367,7 +375,10 @@ def estimate_transfer_function_and_variance(
         * (
             sample_error_xy / np.abs(sample_mean_xy) ** 2
             + sample_error_xx / np.abs(sample_mean_xx) ** 2
-            - 2 * np.real(cov_means.conj() / sample_mean_xx / sample_mean_xy.conj())
+            - 2
+            * np.real(
+                cov_means.conj() / (sample_mean_xx * sample_mean_xy.conj() + 1e-15)
+            )
         )
     )
 

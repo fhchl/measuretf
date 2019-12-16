@@ -38,6 +38,7 @@ def time_align(x, y, fs, trange=None):
 
     If `dt` is positive `x` was delayed and `y` zeropadded for same length.
     """
+    assert len(x) == len(y)
     n = x.size
 
     # cross correlation

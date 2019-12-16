@@ -1,12 +1,11 @@
 """Load data from mat or npz recording files."""
 
-import numpy as np
-import matplotlib.pyplot as plt
-import soundfile as sf
-
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
+import matplotlib.pyplot as plt
+import numpy as np
+import soundfile as sf
 from measuretf.utils import plot_rec
 
 
@@ -64,6 +63,8 @@ def load_recording(fname, n_out=1, n_avg=1):
         recs = orecs[None]
     elif orecs.ndim == 4:
         recs = orecs
+    else:
+        raise ValueError(f"orces.ndim == {orecs.ndim}!")
 
     return recs, fs
 
