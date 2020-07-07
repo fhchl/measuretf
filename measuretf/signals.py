@@ -41,6 +41,7 @@ def exponential_sweep(
        Paris, France, 2000, pp. 1–15.
 
     """
+    # TODO: use scipy.signal.chirp instead?
     n_tap = int(np.round(T * fs))
 
     # start and stop frequencies
@@ -228,7 +229,7 @@ def pink_noise(
 
 
 def white_noise(
-    T, fs, tfade=0.1, flim=(5, 20e3), fknee=30, post_silence=0, noise="randphase"
+    T, fs, tfade=0.1, flim=(5, 20e3), post_silence=0, noise="randphase"
 ):
     """Generate white noise.
 
@@ -238,9 +239,9 @@ def white_noise(
         Length of sound.
     fs : int
         Sampling frequency.
-    tfade : float
+    tfade : float or None
         Fade in and out time with Hann window.
-    flim : array_like
+    flim : array_like or None
         Length-2 sequence giving bandpass frequencies.
 
     Returns
@@ -251,7 +252,6 @@ def white_noise(
     """
     N = int(np.round(T * fs))
     Nf = N // 2 + 1
-    flim = np.asarray(flim)
 
     if noise == "MLS":
         order = int(np.ceil(np.log2(N)))
@@ -265,8 +265,10 @@ def white_noise(
     x = np.fft.irfft(X, n=N)
 
     # bandpass
-    b, a = butter(4, flim / (fs / 2), "bandpass")
-    x = lfilter(b, a, x)
+    if flim is not None:
+        flim = np.asarray(flim)
+        b, a = butter(4, flim / (fs / 2), "bandpass")
+        x = lfilter(b, a, x)
 
     if tfade:
         # TODO: just use a tukey window here
