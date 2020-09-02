@@ -13,7 +13,6 @@ from measuretf.filtering import (freq_window,
 from measuretf.io import load_recording
 from measuretf.utils import covariance, time_align, tqdm, window_nd
 from response import Response
-from sklearn.utils import resample
 
 
 def transfer_function(
@@ -316,6 +315,8 @@ def estimate_transfer_function_and_variance(
     **periodogram_kw,
 ):
     """Estimate transfer function and the variance of the estimate."""
+    from sklearn.utils import resample
+
     x, y, dt = time_align(x, y, fs)
 
     f, per_xy = periodograms(x, y, fs=fs, **periodogram_kw)
@@ -723,7 +724,7 @@ def measure_single_output_impulse_response(
     return transfer_function(ref, meas, axis=0).T
 
 
-def measure_multi_output_impulse_respone(
+def measure_multi_output_impulse_response(
     sound,
     fs_sound,
     out_ch,
