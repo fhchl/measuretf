@@ -234,7 +234,7 @@ def transfer_function_csd(
     assert y.ndim == 1
     assert x.size == y.size
 
-    if compensate_delay is not None:
+    if compensate_delay:
         x, y, dt = time_align(x, y, fs, trange=compensate_range)
 
     f, S_xy = sig.csd(x, y, fs=fs, **kwargs)
@@ -654,6 +654,7 @@ def measure_single_output_impulse_response(
     ref_ch_indx=None,
     ref_sound_indx=None,
     calibration_gains=None,
+    reg_lim_dB=None,
     **sd_kwargs,
 ):
     """Meassure impulse response between single output and multiple inputs.
@@ -721,7 +722,7 @@ def measure_single_output_impulse_response(
         meas = rec
         ref = sound[:, None]
 
-    return transfer_function(ref, meas, axis=0).T
+    return transfer_function(ref, meas, axis=0, reg_lim_dB=reg_lim_dB).T
 
 
 def measure_multi_output_impulse_response(
@@ -857,7 +858,19 @@ def record_single_output_excitation(sound, fs, out_ch=1, in_ch=1, **sd_kwargs):
         blocking=True,
         **sd_kwargs,
     )
-
+    
+    status = sd.get_status()
+    if status.input_underflow:
+        warnings.warn('Input underflow')
+    if status.input_overflow:
+        warnings.warn('Input overflow')
+    if status.output_overflow:
+        warnings.warn('output overflow')
+    if status.output_underflow:
+        warnings.warn('output underflow')
+    if status.priming_output:
+        warnings.warn('Primed output')
+        
     return rec.T
 
 
