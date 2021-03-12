@@ -3,7 +3,7 @@ from distutils.core import setup  # nopep8
 setup(
     author="Franz M. Heuchel",
     name="measuretf",
-    version="0.2",
+    version="0.3",
     packages=["measuretf"],
     install_requires=[
         "numpy",
@@ -13,7 +13,5 @@ setup(
         "sounddevice",
         "response",
         "pysoundfile",
-        "joblib",
-        "sklearn"
     ],
 )

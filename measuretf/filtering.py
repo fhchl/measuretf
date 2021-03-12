@@ -179,8 +179,8 @@ def filter_sound(
         Add this many allpassed sounds to the top of the convsound
 
     """
-    from adafilt import olafilt
-
+    from adafilt.utils import olafilt
+    
     if fs_sound != fs_soundcard:
         up, down = (fs_soundcard / fs_sound).as_integer_ratio()
         print("Resampling sound with {}/{}".format(up, down))
